@@ -13,7 +13,8 @@ This guide explains how to deploy the Component Output Comparison tool to Kebool
 Ensure your repository contains:
 
 - `streamlit_app.py` - Main entry point
-- `requirements.txt` - All Python dependencies
+- `pyproject.toml` - Project configuration with dependencies
+- `uv.lock` - Locked dependency versions
 - All source code in proper structure
 
 **Important**: Do NOT include `.streamlit/secrets.toml` in your repository. This file contains sensitive credentials and should only be used locally.
@@ -56,8 +57,8 @@ If you haven't already created a workspace:
    - Click **Create & Deploy**
    - Keboola will:
      - Clone your repository
-     - Install dependencies from `requirements.txt`
-     - Start the Streamlit application
+     - Install dependencies using `uv sync`
+     - Start the Streamlit application with `uv run streamlit run streamlit_app.py`
      - Provide a URL for accessing the app
 
 ## Step 4: Verify Deployment
@@ -145,16 +146,18 @@ To update your deployed app:
 
 **Solutions**:
 - Check deployment logs for Python errors
-- Verify all dependencies in `requirements.txt` are correct versions
+- Verify all dependencies in `pyproject.toml` are correct versions
 - Ensure `streamlit_app.py` is at the repository root
 - Check that all imports are relative and correct
+- Ensure `uv.lock` is committed to the repository
 
 ### "Module not found" Errors
 
 **Symptoms**: Import errors in logs
 
 **Solutions**:
-- Add missing packages to `requirements.txt`
+- Add missing packages to `pyproject.toml` dependencies
+- Run `uv sync` to update `uv.lock`
 - Verify package names are correct (PyPI names)
 - Check for typos in import statements
 

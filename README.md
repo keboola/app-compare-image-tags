@@ -45,7 +45,7 @@ This tool automates the validation of component upgrades by:
 
 2. **Install dependencies:**
    ```bash
-   pip install -r requirements.txt
+   uv sync
    ```
 
 3. **Configure credentials:**
@@ -64,7 +64,7 @@ This tool automates the validation of component upgrades by:
 
 4. **Run the application:**
    ```bash
-   streamlit run streamlit_app.py
+   uv run streamlit run streamlit_app.py
    ```
 
    The app will open in your browser at `http://localhost:8501`
@@ -122,7 +122,8 @@ See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for detailed deployment instruction
 ```
 app-compare-image-tags/
 ├── streamlit_app.py              # Main entry point
-├── requirements.txt              # Python dependencies
+├── pyproject.toml                # Project config & dependencies
+├── uv.lock                       # Dependency lock file
 ├── .streamlit/
 │   ├── config.toml              # Streamlit configuration
 │   └── secrets.toml.example     # Credentials template
