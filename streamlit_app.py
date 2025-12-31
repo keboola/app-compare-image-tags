@@ -1,0 +1,129 @@
+"""
+Keboola Component Output Comparison Tool - Main Application
+
+This is the main entry point for the Streamlit data app that compares
+component outputs between two different image tags to validate upgrades.
+"""
+
+import streamlit as st
+from page_modules import input_page, orchestration_page, results_page
+
+
+def main():
+    """Main application entry point."""
+    st.set_page_config(
+        page_title="Component Output Comparison",
+        page_icon="🔍",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+
+    # Initialize session state
+    initialize_session_state()
+
+    # Sidebar navigation
+    st.sidebar.title("🔍 Output Comparison")
+    st.sidebar.markdown("---")
+
+    # Determine current phase based on session state
+    current_phase = determine_current_phase()
+
+    # Page selection
+    page_options = ["📝 Input", "⚙️ Execution", "📊 Results"]
+    page_index = ["input", "execution", "results"].index(current_phase)
+
+    page = st.sidebar.radio(
+        "Navigation",
+        page_options,
+        index=page_index
+    )
+
+    # Display current status in sidebar
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### Status")
+
+    if st.session_state.get('config_id'):
+        st.sidebar.success("✅ Configuration validated")
+    else:
+        st.sidebar.info("⏳ Awaiting configuration")
+
+    if st.session_state.get('test_config_id'):
+        st.sidebar.success("✅ Test config created")
+
+    if st.session_state.get('production_job_id'):
+        prod_status = st.session_state.get('production_job_status', 'unknown')
+        if prod_status == 'success':
+            st.sidebar.success("✅ Production run complete")
+        elif prod_status in ['waiting', 'processing']:
+            st.sidebar.info(f"⏳ Production run: {prod_status}")
+        elif prod_status == 'error':
+            st.sidebar.error("❌ Production run failed")
+
+    if st.session_state.get('test_job_id'):
+        test_status = st.session_state.get('test_job_status', 'unknown')
+        if test_status == 'success':
+            st.sidebar.success("✅ Test run complete")
+        elif test_status in ['waiting', 'processing']:
+            st.sidebar.info(f"⏳ Test run: {test_status}")
+        elif test_status == 'error':
+            st.sidebar.error("❌ Test run failed")
+
+    if st.session_state.get('comparison_results'):
+        st.sidebar.success("✅ Comparison complete")
+
+    # Reset button
+    st.sidebar.markdown("---")
+    if st.sidebar.button("🔄 Start New Comparison", use_container_width=True):
+        # Clear all session state
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.rerun()
+
+    # Route to appropriate page
+    if page == "📝 Input":
+        input_page.create_input_page()
+    elif page == "⚙️ Execution":
+        orchestration_page.create_orchestration_page()
+    elif page == "📊 Results":
+        results_page.create_results_page()
+
+
+def initialize_session_state():
+    """Initialize all session state variables with defaults."""
+    defaults = {
+        'config_id': None,
+        'test_image_tag': None,
+        'branch_name': 'comparison-test',
+        'component_id': None,
+        'original_config': None,
+        'branch_id': None,
+        'test_config_id': None,
+        'production_job_id': None,
+        'test_job_id': None,
+        'production_job_status': None,
+        'test_job_status': None,
+        'comparison_results': None,
+    }
+
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+def determine_current_phase() -> str:
+    """
+    Determine current workflow phase based on session state.
+
+    Returns:
+        Current phase: 'input', 'execution', or 'results'
+    """
+    if not st.session_state.get('config_id'):
+        return "input"
+    elif not st.session_state.get('comparison_results'):
+        return "execution"
+    else:
+        return "results"
+
+
+if __name__ == "__main__":
+    main()

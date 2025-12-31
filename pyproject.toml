@@ -1,0 +1,5 @@
+[project]
+name = "app-compare-image-tags"
+version = "1.0.0"
+description = "Compare Keboola component outputs between image tags"
+requires-python = ">=3.9"
