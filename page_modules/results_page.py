@@ -33,7 +33,26 @@ def create_results_page():
         if st.button("🔄 Rerun Comparison", use_container_width=True):
             # Clear current results and trigger rerun
             st.session_state.comparison_results = None
+            st.session_state.comparison_triggered = False
             st.rerun()
+
+    # Display comparison execution log if available
+    if st.session_state.get('comparison_logs'):
+        with st.expander("📋 Comparison Execution Log", expanded=False):
+            logs = st.session_state.get('comparison_logs', [])
+            for log in logs:
+                timestamp = log['timestamp']
+                message = log['message']
+                level = log['level']
+
+                if level == 'success':
+                    st.success(f"[{timestamp}] {message}")
+                elif level == 'warning':
+                    st.warning(f"[{timestamp}] {message}")
+                elif level == 'error':
+                    st.error(f"[{timestamp}] {message}")
+                else:
+                    st.info(f"[{timestamp}] {message}")
 
     # Debug: Show raw results structure
     with st.expander("🔧 Debug: Raw Comparison Results", expanded=False):

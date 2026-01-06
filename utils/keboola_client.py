@@ -19,22 +19,37 @@ from .config import get_config
 class KeboolaAPIClient:
     """Unified client for all Keboola API interactions."""
 
-    def __init__(self, token_override: str = None):
+    def __init__(self, token_override: str = None, kbc_url_override: str = None):
         """
         Initialize the Keboola API client with credentials from config.
 
         Args:
             token_override: Optional token to use instead of config token (for admin operations)
+            kbc_url_override: Optional KBC URL to use instead of config URL
         """
-        self.storage_url = get_config("KBC_URL")
-        self.token = token_override if token_override else get_config("KBC_TOKEN")
-        self.workspace_id = get_config("KBC_WORKSPACE_ID")
+        self.storage_url = kbc_url_override if kbc_url_override else get_config("KBC_URL", default=None)
+        self.token = token_override if token_override else get_config("KBC_TOKEN", default=None)
+        self.workspace_id = get_config("KBC_WORKSPACE_ID", default=None)
+
+        # If storage_url not provided, try to derive from session state config_input
+        if not self.storage_url:
+            try:
+                import streamlit as st
+                config_input = st.session_state.get('config_input', '')
+                if config_input and config_input.startswith('http'):
+                    # Extract base URL from config URL
+                    # e.g., https://connection.keboola.com/admin/projects/... -> https://connection.keboola.com
+                    parts = config_input.split('/')
+                    if len(parts) >= 3:
+                        self.storage_url = f"{parts[0]}//{parts[2]}"
+            except Exception:
+                pass
 
         if not self.storage_url:
-            raise ValueError("KBC_URL must be configured")
+            raise ValueError("KBC_URL must be configured in secrets.toml or provided via kbc_url_override, or pass a full configuration URL through the UI")
 
         if not self.token:
-            raise ValueError("KBC_TOKEN must be configured or provided via token_override")
+            raise ValueError("KBC_TOKEN must be configured in secrets.toml or provided via token_override")
 
         # Trim trailing slashes from storage URL
         self.storage_url = self.storage_url.rstrip('/')
