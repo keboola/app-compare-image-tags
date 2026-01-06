@@ -99,7 +99,56 @@ def setup_phase(client: KeboolaAPIClient):
                         test_branch_id = test_branch.get('id') or test_branch.get('branchId')
                         st.success(f"✅ Test branch created (ID: {test_branch_id})")
 
-                        st.success("✅ Both branches are ready!")
+                        # Wait for branches to be ready (configurations need to be copied)
+                        st.info("⏳ Waiting for branches to be ready... This may take several minutes.")
+
+                        import datetime
+                        start_time = datetime.datetime.now()
+
+                        with st.spinner("Waiting for branch configurations to be copied..."):
+                            elapsed_display = st.empty()
+                            progress_bar = st.progress(0)
+
+                            max_wait = 600  # 10 minutes
+                            poll_interval = 10  # Check every 10 seconds
+                            attempts = 0
+                            max_attempts = max_wait // poll_interval
+
+                            both_ready = False
+                            while attempts < max_attempts:
+                                elapsed = (datetime.datetime.now() - start_time).total_seconds()
+                                elapsed_display.caption(f"⏱️ Elapsed time: {int(elapsed // 60)}m {int(elapsed % 60)}s")
+
+                                # Check if both branches have configurations
+                                try:
+                                    # Try to get the config in each branch to verify it's been copied
+                                    prod_config = branch_client.get_configuration_in_branch(
+                                        component_id=st.session_state['component_id'],
+                                        config_id=st.session_state['config_id'],
+                                        branch_id=prod_branch_id
+                                    )
+                                    test_config = branch_client.get_configuration_in_branch(
+                                        component_id=st.session_state['component_id'],
+                                        config_id=st.session_state['config_id'],
+                                        branch_id=test_branch_id
+                                    )
+
+                                    if prod_config and test_config:
+                                        both_ready = True
+                                        st.info("✅ Configurations found in both branches!")
+                                        break
+                                except Exception as e:
+                                    # Configurations not ready yet, keep waiting
+                                    pass
+
+                                time.sleep(poll_interval)
+                                attempts += 1
+                                progress_bar.progress(min(attempts / max_attempts, 0.99))
+
+                            if both_ready:
+                                st.success(f"✅ Both branches are ready! (took {int(elapsed // 60)}m {int(elapsed % 60)}s)")
+                            else:
+                                st.warning("⚠️ Branches taking longer than expected. If configurations exist, proceeding anyway...")
 
                         # Store branch IDs
                         st.session_state.production_branch_id = prod_branch_id
