@@ -45,18 +45,18 @@ def create_input_page():
     # Input form
     with st.form("config_input_form"):
         user_token = st.text_input(
-            "Keboola Storage API Token",
+            "Keboola Admin Token",
             type="password",
             value=st.session_state.get('user_token', ''),
-            help="Your Keboola Storage API token for accessing configurations",
-            placeholder="Enter your token here"
+            help="Your Keboola admin token (must have permissions to create development branches)",
+            placeholder="Enter your admin token here"
         )
 
         config_input = st.text_input(
-            "Configuration ID or URL",
+            "Production Configuration URL",
             value=st.session_state.get('config_input', ''),
-            help="Paste the configuration URL from Keboola or just the configuration ID",
-            placeholder="e.g., https://connection.keboola.com/.../01kcrfjxt5wvms53ds3vy6x5h1 or just 01kcrfjxt5wvms53ds3vy6x5h1"
+            help="Paste the PRODUCTION configuration URL from Keboola (full URL required)",
+            placeholder="e.g., https://connection.keboola.com/admin/projects/12345/components/keboola.ex-instagram-v2/01kcrfjxt5wvms53ds3vy6x5h1"
         )
 
         col1, col2 = st.columns(2)
@@ -83,11 +83,19 @@ def create_input_page():
             help="Name for dev branch (will create if doesn't exist)"
         )
 
-        submitted = st.form_submit_button("Validate Configuration", type="primary")
+        st.markdown("---")
+
+        auto_run = st.checkbox(
+            "🚀 Auto-run to completion",
+            value=st.session_state.get('auto_run', False),
+            help="Automatically execute all steps without manual clicks (create branches, run jobs, wait for completion, run comparison)"
+        )
+
+        submitted = st.form_submit_button("Validate Configuration & Start", type="primary")
 
     if submitted:
         if not user_token:
-            st.error("❌ Please provide your Keboola Storage API Token")
+            st.error("❌ Please provide your Keboola Admin Token")
             return
 
         if not config_input or not production_tag or not test_tag:
@@ -100,7 +108,7 @@ def create_input_page():
             st.error("❌ Invalid configuration ID or URL format")
             return
 
-        validate_and_proceed(config_id, component_id, config_input, production_tag, test_tag, branch_name, user_token)
+        validate_and_proceed(config_id, component_id, config_input, production_tag, test_tag, branch_name, user_token, auto_run)
 
 
 def parse_config_url(input_str: str) -> tuple:
@@ -150,7 +158,8 @@ def validate_and_proceed(
     production_tag: str,
     test_tag: str,
     branch_name: str,
-    user_token: str
+    user_token: str,
+    auto_run: bool
 ):
     """
     Validate inputs and prepare for execution.
@@ -162,7 +171,8 @@ def validate_and_proceed(
         production_tag: Production image tag
         test_tag: Test image tag
         branch_name: Development branch name
-        user_token: User's Keboola Storage API token
+        user_token: User's Keboola admin token (with branch creation permissions)
+        auto_run: Whether to automatically run all steps to completion
     """
     with st.spinner("Validating configuration..."):
         try:
@@ -191,9 +201,13 @@ def validate_and_proceed(
             st.session_state.branch_name = branch_name
             st.session_state.original_config = config
             st.session_state.component_id = component_id
+            st.session_state.auto_run = auto_run
 
             st.success("✅ Configuration validated successfully!")
-            st.info("👉 Navigate to **⚙️ Execution** in the sidebar to continue")
+            if auto_run:
+                st.success("🚀 Auto-run enabled - will proceed automatically to completion")
+            else:
+                st.info("👉 Navigate to **⚙️ Execution** in the sidebar to continue")
 
             # Brief pause before rerun to show success messages
             import time

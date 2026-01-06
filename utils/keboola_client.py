@@ -401,6 +401,9 @@ class KeboolaAPIClient:
         Returns:
             Branch dictionary
         """
+        # Clear cache to ensure we get fresh branch list
+        st.cache_data.clear()
+
         branches = self.list_branches()
 
         # Check if branch exists
@@ -408,8 +411,21 @@ class KeboolaAPIClient:
             if branch['name'] == name:
                 return branch
 
-        # Create if doesn't exist
-        return self.create_branch(name, f"Comparison test branch created by data app")
+        # Try to create, but handle case where it already exists
+        try:
+            return self.create_branch(name, f"Comparison test branch created by data app")
+        except ValueError as e:
+            if "duplicateName" in str(e):
+                # Branch was just created, fetch the fresh list again
+                st.cache_data.clear()
+                branches = self.list_branches()
+                for branch in branches:
+                    if branch['name'] == name:
+                        return branch
+                # If still not found, re-raise the error
+                raise
+            else:
+                raise
 
     # ==================== Metadata Access ====================
 

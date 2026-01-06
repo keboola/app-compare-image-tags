@@ -58,6 +58,8 @@ def setup_phase(client: KeboolaAPIClient):
     st.markdown("---")
 
     # Step 1: Development Branches (one for each config to avoid data collision)
+    auto_run_enabled = st.session_state.get('auto_run', False)
+
     with st.expander("Step 1: Development Branches", expanded=not (st.session_state.get('production_branch_id') and st.session_state.get('test_branch_id'))):
         if st.session_state.get('production_branch_id') and st.session_state.get('test_branch_id'):
             st.success(f"✅ Production branch ready (ID: {st.session_state['production_branch_id']})")
@@ -65,28 +67,20 @@ def setup_phase(client: KeboolaAPIClient):
         else:
             st.info("Creating two development branches to isolate outputs")
 
-            st.warning("""
-            **Note:** Branch creation requires admin token permissions.
-            If you don't have admin access, provide a token with branch creation permissions below.
-            """)
+            if not auto_run_enabled:
+                st.info("""
+                **Note:** Using the admin token provided on the input page.
+                If branch creation fails, ensure your token has the required permissions.
+                """)
 
-            # Optional admin token input
-            admin_token = st.text_input(
-                "Admin Token (optional)",
-                type="password",
-                help="Provide a token with branch creation permissions if your current user doesn't have admin access",
-                key="admin_token_input"
-            )
+            # Auto-run or manual button trigger
+            trigger_branch_creation = auto_run_enabled or st.button("Create or Reuse Development Branches", type="primary")
 
-            if st.button("Create Development Branches", type="primary"):
+            if trigger_branch_creation:
                 with st.spinner("Setting up development branches..."):
                     try:
-                        # Use admin token if provided, otherwise use default client
+                        # Use the admin token from input page (already stored in client)
                         branch_client = client
-                        if admin_token:
-                            from utils.keboola_client import KeboolaAPIClient
-                            branch_client = KeboolaAPIClient(token_override=admin_token)
-                            st.info("Using provided admin token for branch operations")
 
                         # First check if we can list branches
                         st.info("Checking branch access...")
@@ -105,45 +99,7 @@ def setup_phase(client: KeboolaAPIClient):
                         test_branch_id = test_branch.get('id') or test_branch.get('branchId')
                         st.success(f"✅ Test branch created (ID: {test_branch_id})")
 
-                        # Wait for branches to be ready (especially with many configurations)
-                        st.info("⏳ Waiting for branches to be ready (this may take several minutes with 1000+ configurations)...")
-
-                        import datetime
-                        start_time = datetime.datetime.now()
-
-                        with st.spinner("Polling branch status..."):
-                            elapsed_display = st.empty()
-                            progress_bar = st.progress(0)
-
-                            max_wait = 600  # 10 minutes
-                            poll_interval = 10  # Check every 10 seconds
-                            attempts = 0
-                            max_attempts = max_wait // poll_interval
-
-                            both_ready = False
-                            while attempts < max_attempts:
-                                elapsed = (datetime.datetime.now() - start_time).total_seconds()
-                                elapsed_display.caption(f"⏱️ Elapsed time: {int(elapsed // 60)}m {int(elapsed % 60)}s")
-
-                                # Check if both branches are ready
-                                try:
-                                    prod_ready = branch_client.get_branch(prod_branch_id) is not None
-                                    test_ready = branch_client.get_branch(test_branch_id) is not None
-
-                                    if prod_ready and test_ready:
-                                        both_ready = True
-                                        break
-                                except:
-                                    pass
-
-                                time.sleep(poll_interval)
-                                attempts += 1
-                                progress_bar.progress(min(attempts / max_attempts, 0.99))
-
-                            if both_ready:
-                                st.success(f"✅ Both branches are ready! (took {int(elapsed // 60)}m {int(elapsed % 60)}s)")
-                            else:
-                                st.warning("⚠️ Branches taking longer than expected, but continuing...")
+                        st.success("✅ Both branches are ready!")
 
                         # Store branch IDs
                         st.session_state.production_branch_id = prod_branch_id
@@ -165,60 +121,64 @@ def setup_phase(client: KeboolaAPIClient):
 
             if st.session_state.get('production_config_updated'):
                 st.success(f"✅ Production config updated in branch (Config ID: {st.session_state['config_id']})")
-            elif st.button("Update Production Branch Config", type="primary", key="update_prod_config"):
-                with st.spinner("Updating production configuration in branch..."):
-                    try:
-                        # Debug info
-                        st.info(f"Updating config ID: {st.session_state['config_id']}")
-                        st.info(f"In branch ID: {st.session_state['production_branch_id']}")
-                        st.info(f"Component: {st.session_state['component_id']}")
-                        st.info(f"Setting tag to: {st.session_state['production_image_tag']}")
+            else:
+                # Auto-run or manual button trigger
+                trigger_prod_update = auto_run_enabled or st.button("Update Production Branch Config", type="primary", key="update_prod_config")
 
-                        # Update the existing config (auto-copied from main) in the branch
-                        prod_config = client.update_configuration_tag(
-                            component_id=st.session_state['component_id'],
-                            config_id=st.session_state['config_id'],
-                            config_data=st.session_state['original_config']['configuration'],
-                            new_tag=st.session_state['production_image_tag'],
-                            branch_id=st.session_state['production_branch_id']
-                        )
+                if trigger_prod_update:
+                    with st.spinner("Updating production configuration in branch..."):
+                        try:
+                            # Debug info
+                            st.info(f"Updating config ID: {st.session_state['config_id']}")
+                            st.info(f"In branch ID: {st.session_state['production_branch_id']}")
+                            st.info(f"Component: {st.session_state['component_id']}")
+                            st.info(f"Setting tag to: {st.session_state['production_image_tag']}")
 
-                        # Verify the update by reading back from the branch
-                        st.info("Verifying update in production branch...")
-                        verified_config = client.get_configuration_in_branch(
-                            component_id=st.session_state['component_id'],
-                            config_id=st.session_state['config_id'],
-                            branch_id=st.session_state['production_branch_id']
-                        )
+                            # Update the existing config (auto-copied from main) in the branch
+                            prod_config = client.update_configuration_tag(
+                                component_id=st.session_state['component_id'],
+                                config_id=st.session_state['config_id'],
+                                config_data=st.session_state['original_config']['configuration'],
+                                new_tag=st.session_state['production_image_tag'],
+                                branch_id=st.session_state['production_branch_id']
+                            )
 
-                        verified_tag = verified_config.get('configuration', {}).get('runtime', {}).get('image_tag', 'NOT SET')
+                            # Verify the update by reading back from the branch
+                            st.info("Verifying update in production branch...")
+                            verified_config = client.get_configuration_in_branch(
+                                component_id=st.session_state['component_id'],
+                                config_id=st.session_state['config_id'],
+                                branch_id=st.session_state['production_branch_id']
+                            )
 
-                        if verified_tag == st.session_state['production_image_tag']:
-                            st.success(f"✅ Production config updated in branch - Verified tag: {verified_tag}")
-                            st.session_state.production_config_updated = True
-                        else:
-                            st.error(f"❌ Verification failed! Expected tag: {st.session_state['production_image_tag']}, Got: {verified_tag}")
+                            verified_tag = verified_config.get('configuration', {}).get('runtime', {}).get('image_tag', 'NOT SET')
 
-                        # Debug: Show full config response
-                        with st.expander("Debug: Production Config Details", expanded=True):
-                            st.write("**API Headers Used:**")
-                            st.json({
-                                "X-KBC-BranchId": str(st.session_state['production_branch_id']),
-                                "URL": f"/v2/storage/components/{st.session_state['component_id']}/configs/{st.session_state['config_id']}"
-                            })
-                            st.write("**Update Response:**")
-                            st.json(prod_config)
-                            st.write("**Verified Config from Branch:**")
-                            st.json(verified_config)
-                            if 'configuration' in verified_config:
-                                st.write("**Runtime Settings (Verified):**")
-                                st.json(verified_config['configuration'].get('runtime', {}))
+                            if verified_tag == st.session_state['production_image_tag']:
+                                st.success(f"✅ Production config updated in branch - Verified tag: {verified_tag}")
+                                st.session_state.production_config_updated = True
+                            else:
+                                st.error(f"❌ Verification failed! Expected tag: {st.session_state['production_image_tag']}, Got: {verified_tag}")
 
-                        time.sleep(1)
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"❌ Failed to update production configuration: {str(e)}")
-                        st.exception(e)
+                            # Debug: Show full config response
+                            with st.expander("Debug: Production Config Details", expanded=True):
+                                st.write("**API Headers Used:**")
+                                st.json({
+                                    "X-KBC-BranchId": str(st.session_state['production_branch_id']),
+                                    "URL": f"/v2/storage/components/{st.session_state['component_id']}/configs/{st.session_state['config_id']}"
+                                })
+                                st.write("**Update Response:**")
+                                st.json(prod_config)
+                                st.write("**Verified Config from Branch:**")
+                                st.json(verified_config)
+                                if 'configuration' in verified_config:
+                                    st.write("**Runtime Settings (Verified):**")
+                                    st.json(verified_config['configuration'].get('runtime', {}))
+
+                            time.sleep(1)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Failed to update production configuration: {str(e)}")
+                            st.exception(e)
 
     # Step 3: Test Configuration (with test tag)
     if st.session_state.get('production_config_updated'):
@@ -230,59 +190,63 @@ def setup_phase(client: KeboolaAPIClient):
 
             if st.session_state.get('test_config_updated'):
                 st.success(f"✅ Test config updated in branch (Config ID: {st.session_state['config_id']})")
-            elif st.button("Update Test Branch Config", type="primary", key="update_test_config"):
-                with st.spinner("Updating test configuration in branch..."):
-                    try:
-                        # Debug info
-                        st.info(f"Updating config ID: {st.session_state['config_id']}")
-                        st.info(f"In branch ID: {st.session_state['test_branch_id']}")
-                        st.info(f"Setting tag to: {st.session_state['test_image_tag']}")
+            else:
+                # Auto-run or manual button trigger
+                trigger_test_update = auto_run_enabled or st.button("Update Test Branch Config", type="primary", key="update_test_config")
 
-                        # Update the existing config (auto-copied from main) in the branch
-                        test_config = client.update_configuration_tag(
-                            component_id=st.session_state['component_id'],
-                            config_id=st.session_state['config_id'],
-                            config_data=st.session_state['original_config']['configuration'],
-                            new_tag=st.session_state['test_image_tag'],
-                            branch_id=st.session_state['test_branch_id']
-                        )
+                if trigger_test_update:
+                    with st.spinner("Updating test configuration in branch..."):
+                        try:
+                            # Debug info
+                            st.info(f"Updating config ID: {st.session_state['config_id']}")
+                            st.info(f"In branch ID: {st.session_state['test_branch_id']}")
+                            st.info(f"Setting tag to: {st.session_state['test_image_tag']}")
 
-                        # Verify the update by reading back from the branch
-                        st.info("Verifying update in test branch...")
-                        verified_config = client.get_configuration_in_branch(
-                            component_id=st.session_state['component_id'],
-                            config_id=st.session_state['config_id'],
-                            branch_id=st.session_state['test_branch_id']
-                        )
+                            # Update the existing config (auto-copied from main) in the branch
+                            test_config = client.update_configuration_tag(
+                                component_id=st.session_state['component_id'],
+                                config_id=st.session_state['config_id'],
+                                config_data=st.session_state['original_config']['configuration'],
+                                new_tag=st.session_state['test_image_tag'],
+                                branch_id=st.session_state['test_branch_id']
+                            )
 
-                        verified_tag = verified_config.get('configuration', {}).get('runtime', {}).get('image_tag', 'NOT SET')
+                            # Verify the update by reading back from the branch
+                            st.info("Verifying update in test branch...")
+                            verified_config = client.get_configuration_in_branch(
+                                component_id=st.session_state['component_id'],
+                                config_id=st.session_state['config_id'],
+                                branch_id=st.session_state['test_branch_id']
+                            )
 
-                        if verified_tag == st.session_state['test_image_tag']:
-                            st.success(f"✅ Test config updated in branch - Verified tag: {verified_tag}")
-                            st.session_state.test_config_updated = True
-                        else:
-                            st.error(f"❌ Verification failed! Expected tag: {st.session_state['test_image_tag']}, Got: {verified_tag}")
+                            verified_tag = verified_config.get('configuration', {}).get('runtime', {}).get('image_tag', 'NOT SET')
 
-                        # Debug: Show full config response
-                        with st.expander("Debug: Test Config Details", expanded=True):
-                            st.write("**API Headers Used:**")
-                            st.json({
-                                "X-KBC-BranchId": str(st.session_state['test_branch_id']),
-                                "URL": f"/v2/storage/components/{st.session_state['component_id']}/configs/{st.session_state['config_id']}"
-                            })
-                            st.write("**Update Response:**")
-                            st.json(test_config)
-                            st.write("**Verified Config from Branch:**")
-                            st.json(verified_config)
-                            if 'configuration' in verified_config:
-                                st.write("**Runtime Settings (Verified):**")
-                                st.json(verified_config['configuration'].get('runtime', {}))
+                            if verified_tag == st.session_state['test_image_tag']:
+                                st.success(f"✅ Test config updated in branch - Verified tag: {verified_tag}")
+                                st.session_state.test_config_updated = True
+                            else:
+                                st.error(f"❌ Verification failed! Expected tag: {st.session_state['test_image_tag']}, Got: {verified_tag}")
 
-                        time.sleep(1)
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"❌ Failed to update test configuration: {str(e)}")
-                        st.exception(e)
+                            # Debug: Show full config response
+                            with st.expander("Debug: Test Config Details", expanded=True):
+                                st.write("**API Headers Used:**")
+                                st.json({
+                                    "X-KBC-BranchId": str(st.session_state['test_branch_id']),
+                                    "URL": f"/v2/storage/components/{st.session_state['component_id']}/configs/{st.session_state['config_id']}"
+                                })
+                                st.write("**Update Response:**")
+                                st.json(test_config)
+                                st.write("**Verified Config from Branch:**")
+                                st.json(verified_config)
+                                if 'configuration' in verified_config:
+                                    st.write("**Runtime Settings (Verified):**")
+                                    st.json(verified_config['configuration'].get('runtime', {}))
+
+                            time.sleep(1)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Failed to update test configuration: {str(e)}")
+                            st.exception(e)
 
 
 def execution_phase(client: KeboolaAPIClient):
@@ -308,7 +272,11 @@ def execution_phase(client: KeboolaAPIClient):
 
     st.markdown("---")
 
-    if st.button("Start Comparison Runs", type="primary", use_container_width=True):
+    # Auto-run or manual button trigger
+    auto_run_enabled = st.session_state.get('auto_run', False)
+    trigger_jobs = auto_run_enabled or st.button("Start Comparison Runs", type="primary", use_container_width=True)
+
+    if trigger_jobs:
         with st.spinner("Triggering jobs..."):
             try:
                 # Show debug info
@@ -389,7 +357,11 @@ def monitoring_phase(client: KeboolaAPIClient):
         st.markdown("---")
         st.success("✅ Both jobs completed successfully!")
 
-        if st.button("Proceed to Comparison", type="primary", use_container_width=True):
+        # Auto-run or manual button trigger
+        auto_run_enabled = st.session_state.get('auto_run', False)
+        trigger_comparison = auto_run_enabled or st.button("Proceed to Comparison", type="primary", use_container_width=True)
+
+        if trigger_comparison:
             start_comparison(client)
 
     # Handle errors
