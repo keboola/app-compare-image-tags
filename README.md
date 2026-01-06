@@ -48,19 +48,22 @@ This tool automates the validation of component upgrades by:
    uv sync
    ```
 
-3. **Configure credentials:**
+3. **Configure environment:**
    ```bash
    cp .streamlit/secrets.toml.example .streamlit/secrets.toml
    ```
 
-   Edit `.streamlit/secrets.toml` with your Keboola credentials:
+   Edit `.streamlit/secrets.toml` with your Keboola connection details:
    ```toml
    KBC_URL = "https://connection.<region>.<provider>.keboola.com"
-   KBC_TOKEN = "your-storage-api-token"
    KBC_WORKSPACE_ID = "your-workspace-id"
    ```
 
-   **Important:** Never commit `.streamlit/secrets.toml` to git!
+   **Important Notes:**
+   - Never commit `.streamlit/secrets.toml` to git!
+   - **Tokens are provided via UI**: You'll enter your Keboola Storage API token in the app when you use it (not stored in secrets)
+   - **Branch Creation**: If your token doesn't have branch creation permissions, you can provide an admin token through the UI when needed (see Execution page)
+   - **In production**: The app automatically uses the logged-in user's token from environment variables
 
 4. **Run the application:**
    ```bash
@@ -79,8 +82,10 @@ See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for detailed deployment instruction
 
 1. Navigate to the **Input** page
 2. Enter:
-   - **Production Configuration ID**: The numeric ID of your existing production configuration
-   - **Test Image Tag**: The new image tag you want to test (e.g., "2.0.0", "latest")
+   - **Keboola Storage API Token**: Your personal Keboola token for accessing configurations
+   - **Configuration ID or URL**: The full URL or just the ID of your existing production configuration
+   - **Production Image Tag**: Current/production image tag (default: "latest")
+   - **Test Image Tag**: The new image tag you want to test (e.g., "2.0.0")
    - **Development Branch Name**: Optional name for the test branch (default: "comparison-test")
 3. Click **Validate Configuration**
 4. Once validated, proceed to the Execution page
@@ -89,8 +94,9 @@ See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for detailed deployment instruction
 
 1. Navigate to the **Execution** page
 2. The setup phase will:
-   - Create or select a development branch
-   - Create a test configuration with your specified image tag
+   - Create or select development branches (production and test)
+   - **Admin Token (Optional)**: If your user doesn't have branch creation permissions, provide a token with admin access in the "Admin Token" field
+   - Create test configurations with your specified image tags
 3. Click **Start Comparison Runs** to trigger both jobs
 4. Monitor real-time progress for both production and test runs
 5. Once both jobs complete successfully, click **Proceed to Comparison**
@@ -163,12 +169,18 @@ For API usage examples, see [docs/API_REFERENCE.md](docs/API_REFERENCE.md).
 ## Troubleshooting
 
 ### "Configuration not found"
-- Verify the configuration ID is correct
-- Ensure your Storage API token has access to the component
+- Verify the configuration ID/URL is correct
+- Ensure the token you entered has access to the component
+- Try entering the full configuration URL instead of just the ID
 
-### "Failed to create branch"
-- Check that your token has permissions to create development branches
-- Verify the branch name doesn't already exist with conflicts
+### "Failed to create branch" (403 Forbidden)
+- **Solution**: Use the **Admin Token** field in the Execution page to provide a token with branch creation permissions
+- **How to get an admin token**:
+  1. Go to Keboola UI → Your Profile → Tokens → Create New Token
+  2. Ensure the token has admin permissions
+  3. Copy the token and paste it into the "Admin Token (optional)" field in the app
+- **Note**: This applies to both local development and production environments
+- Verify the Development Branches feature is enabled for your project (it's in public beta)
 
 ### "Workspace query failed"
 - Ensure `KBC_WORKSPACE_ID` is correctly configured

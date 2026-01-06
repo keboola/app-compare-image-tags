@@ -91,13 +91,18 @@ def main():
 def initialize_session_state():
     """Initialize all session state variables with defaults."""
     defaults = {
+        'user_token': None,
         'config_id': None,
+        'config_input': None,
+        'production_image_tag': 'latest',
         'test_image_tag': None,
         'branch_name': 'comparison-test',
         'component_id': None,
         'original_config': None,
-        'branch_id': None,
-        'test_config_id': None,
+        'production_branch_id': None,
+        'test_branch_id': None,
+        'production_config_updated': False,
+        'test_config_updated': False,
         'production_job_id': None,
         'test_job_id': None,
         'production_job_status': None,

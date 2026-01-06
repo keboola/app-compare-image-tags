@@ -44,21 +44,36 @@ def create_input_page():
 
     # Input form
     with st.form("config_input_form"):
+        user_token = st.text_input(
+            "Keboola Storage API Token",
+            type="password",
+            value=st.session_state.get('user_token', ''),
+            help="Your Keboola Storage API token for accessing configurations",
+            placeholder="Enter your token here"
+        )
+
+        config_input = st.text_input(
+            "Configuration ID or URL",
+            value=st.session_state.get('config_input', ''),
+            help="Paste the configuration URL from Keboola or just the configuration ID",
+            placeholder="e.g., https://connection.keboola.com/.../01kcrfjxt5wvms53ds3vy6x5h1 or just 01kcrfjxt5wvms53ds3vy6x5h1"
+        )
+
         col1, col2 = st.columns(2)
 
         with col1:
-            config_id = st.text_input(
-                "Production Configuration ID",
-                value=st.session_state.get('config_id', ''),
-                help="Numeric ID of existing production configuration",
-                placeholder="e.g., 123456"
+            production_tag = st.text_input(
+                "Production Image Tag",
+                value=st.session_state.get('production_image_tag', 'latest'),
+                help="Current/production image tag to compare from (default: 'latest')",
+                placeholder="e.g., latest"
             )
 
         with col2:
             test_tag = st.text_input(
                 "Test Image Tag",
                 value=st.session_state.get('test_image_tag', ''),
-                help="Image tag to test (e.g., '2.0.0', 'latest')",
+                help="New image tag to test against production",
                 placeholder="e.g., 2.0.0"
             )
 
@@ -71,36 +86,107 @@ def create_input_page():
         submitted = st.form_submit_button("Validate Configuration", type="primary")
 
     if submitted:
-        if not config_id or not test_tag:
-            st.error("❌ Please provide both Configuration ID and Test Image Tag")
+        if not user_token:
+            st.error("❌ Please provide your Keboola Storage API Token")
             return
 
-        validate_and_proceed(config_id, test_tag, branch_name)
+        if not config_input or not production_tag or not test_tag:
+            st.error("❌ Please provide Configuration ID/URL and both image tags")
+            return
+
+        # Parse config ID and component ID from URL or direct input
+        config_id, component_id = parse_config_url(config_input)
+        if not config_id:
+            st.error("❌ Invalid configuration ID or URL format")
+            return
+
+        validate_and_proceed(config_id, component_id, config_input, production_tag, test_tag, branch_name, user_token)
 
 
-def validate_and_proceed(config_id: str, test_tag: str, branch_name: str):
+def parse_config_url(input_str: str) -> tuple:
+    """
+    Parse configuration and component IDs from either direct ID or full Keboola URL.
+
+    Args:
+        input_str: Configuration ID or full URL
+
+    Returns:
+        Tuple of (config_id, component_id or None)
+
+    Examples:
+        "01kcrfjxt5wvms53ds3vy6x5h1" -> ("01kcrfjxt5wvms53ds3vy6x5h1", None)
+        "https://.../components/keboola.ex-instagram-v2/01kcrfjxt5wvms53ds3vy6x5h1"
+            -> ("01kcrfjxt5wvms53ds3vy6x5h1", "keboola.ex-instagram-v2")
+    """
+    input_str = input_str.strip()
+
+    # If it's a URL, extract component ID and config ID
+    if input_str.startswith("http://") or input_str.startswith("https://"):
+        parts = input_str.rstrip('/').split('/')
+        if len(parts) >= 2 and 'components' in parts:
+            # Find the components index
+            try:
+                comp_idx = parts.index('components')
+                if comp_idx + 2 < len(parts):
+                    component_id = parts[comp_idx + 1]
+                    config_id = parts[comp_idx + 2]
+                    return (config_id, component_id)
+            except (ValueError, IndexError):
+                pass
+
+        # Fallback: just get the last part as config ID
+        if parts:
+            return (parts[-1], None)
+        return ("", None)
+
+    # Otherwise, treat as direct config ID
+    return (input_str, None)
+
+
+def validate_and_proceed(
+    config_id: str,
+    component_id: str,
+    config_input: str,
+    production_tag: str,
+    test_tag: str,
+    branch_name: str,
+    user_token: str
+):
     """
     Validate inputs and prepare for execution.
 
     Args:
-        config_id: Configuration ID
+        config_id: Parsed configuration ID
+        component_id: Component ID (if parsed from URL, else None)
+        config_input: Original input (for display)
+        production_tag: Production image tag
         test_tag: Test image tag
         branch_name: Development branch name
+        user_token: User's Keboola Storage API token
     """
     with st.spinner("Validating configuration..."):
         try:
-            client = KeboolaAPIClient()
+            client = KeboolaAPIClient(token_override=user_token)
 
             # Fetch config to validate it exists
-            config = client.get_configuration(config_id)
-            component_id = config['component']
+            if component_id:
+                # If we have component ID from URL, fetch directly
+                config = client.get_configuration_direct(component_id, config_id)
+            else:
+                # Otherwise search through all components
+                config = client.get_configuration(config_id)
+                component_id = config['component']
 
             st.success(f"✅ Found configuration: **{config['name']}**")
             st.info(f"**Component:** {component_id}")
+            st.info(f"**Production Tag:** {production_tag}")
             st.info(f"**Test Tag:** {test_tag}")
 
             # Store in session state
+            st.session_state.user_token = user_token
             st.session_state.config_id = config_id
+            st.session_state.config_input = config_input
+            st.session_state.production_image_tag = production_tag
             st.session_state.test_image_tag = test_tag
             st.session_state.branch_name = branch_name
             st.session_state.original_config = config
@@ -116,7 +202,7 @@ def validate_and_proceed(config_id: str, test_tag: str, branch_name: str):
 
         except ValueError as e:
             st.error(f"❌ Configuration not found: {str(e)}")
-            st.info("Please check the configuration ID and try again.")
+            st.info("Please check the configuration ID/URL and try again.")
 
         except Exception as e:
             st.error(f"❌ Failed to validate configuration: {str(e)}")

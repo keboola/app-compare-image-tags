@@ -27,18 +27,31 @@ def create_results_page():
         st.warning("⚠️ No comparison results available. Please complete the execution phase.")
         return
 
+    # Add rerun comparison button at the top
+    col1, col2 = st.columns([3, 1])
+    with col2:
+        if st.button("🔄 Rerun Comparison", use_container_width=True):
+            # Clear current results and trigger rerun
+            st.session_state.comparison_results = None
+            st.rerun()
+
+    # Debug: Show raw results structure
+    with st.expander("🔧 Debug: Raw Comparison Results", expanded=False):
+        st.json(results)
+
     # Display configuration info at the top
     with st.expander("ℹ️ Comparison Details", expanded=False):
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("**Production Configuration:**")
             st.text(f"Config ID: {st.session_state.get('config_id')}")
-            st.text(f"Branch: default")
+            st.text(f"Image Tag: {st.session_state.get('production_image_tag')}")
+            st.text(f"Branch: {st.session_state.get('branch_name')}-production")
         with col2:
             st.markdown("**Test Configuration:**")
-            st.text(f"Config ID: {st.session_state.get('test_config_id')}")
-            st.text(f"Branch: {st.session_state.get('branch_name')}")
+            st.text(f"Config ID: {st.session_state.get('config_id')}")
             st.text(f"Image Tag: {st.session_state.get('test_image_tag')}")
+            st.text(f"Branch: {st.session_state.get('branch_name')}-test")
 
     st.markdown("---")
 
@@ -66,10 +79,19 @@ def display_summary_tab(results: dict):
     Args:
         results: Full comparison results dictionary
     """
+    # Safety check for summary
+    if 'summary' not in results:
+        st.error("❌ Summary data missing from comparison results")
+        return
+
     summary = results['summary']
 
+    # Debug: Show summary structure
+    with st.expander("🔧 Debug: Summary Data", expanded=False):
+        st.json(summary)
+
     # Overall status banner
-    if summary['overall_status'] == 'match':
+    if summary.get('overall_status') == 'match':
         st.success("✅ Outputs match perfectly!")
         st.balloons()
     else:
@@ -82,13 +104,13 @@ def display_summary_tab(results: dict):
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        st.metric("Total Buckets", summary['total_buckets'])
+        st.metric("Total Buckets", summary.get('total_buckets', 0))
     with col2:
-        st.metric("Matching Buckets", summary['matching_buckets'])
+        st.metric("Matching Buckets", summary.get('matching_buckets', 0))
     with col3:
-        st.metric("Total Tables", summary['total_tables'])
+        st.metric("Total Tables", summary.get('total_tables', 0))
     with col4:
-        st.metric("Matching Tables", summary['matching_tables'])
+        st.metric("Matching Tables", summary.get('matching_tables', 0))
 
     # Difference breakdown
     if summary['overall_status'] != 'match':
