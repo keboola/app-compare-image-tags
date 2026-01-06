@@ -65,7 +65,15 @@ def create_orchestration_page():
         st.warning("⚠️ Please complete the Input phase first")
         return
 
-    client = KeboolaAPIClient(token_override=st.session_state.get('user_token'))
+    # Extract KBC URL from config input
+    kbc_url = None
+    config_input = st.session_state.get('config_input', '')
+    if config_input and config_input.startswith('http'):
+        parts = config_input.split('/')
+        if len(parts) >= 3:
+            kbc_url = f"{parts[0]}//{parts[2]}"
+
+    client = KeboolaAPIClient(token_override=st.session_state.get('user_token'), kbc_url_override=kbc_url)
 
     # Phase 1: Setup (create branches and update configs)
     if not (st.session_state.get('production_config_updated') and st.session_state.get('test_config_updated')):
@@ -120,6 +128,12 @@ def setup_phase(client: KeboolaAPIClient):
             trigger_branch_creation = auto_run_enabled or st.button("Create or Reuse Development Branches", type="primary")
 
             if trigger_branch_creation:
+                # Clear any stale branch IDs from previous runs
+                st.session_state.pop('production_branch_id', None)
+                st.session_state.pop('test_branch_id', None)
+                st.session_state.pop('production_config_updated', None)
+                st.session_state.pop('test_config_updated', None)
+                st.session_state.pop('branch_creation_logs', None)
                 with st.spinner("Setting up development branches..."):
                     try:
                         # Use the admin token from input page (already stored in client)
@@ -133,6 +147,11 @@ def setup_phase(client: KeboolaAPIClient):
                         # Create production branch
                         add_log('branch_creation', f"Getting or creating production branch: {st.session_state['branch_name']}-production")
                         prod_branch = branch_client.get_or_create_branch(f"{st.session_state['branch_name']}-production")
+
+                        # Debug: Show full branch response
+                        with st.expander("🔧 Debug: Production Branch Response", expanded=True):
+                            st.json(prod_branch)
+
                         prod_branch_id = prod_branch.get('id') or prod_branch.get('branchId')
 
                         # Check if branch already existed (has configs)
@@ -144,6 +163,11 @@ def setup_phase(client: KeboolaAPIClient):
                         # Create test branch
                         add_log('branch_creation', f"Getting or creating test branch: {st.session_state['branch_name']}-test")
                         test_branch = branch_client.get_or_create_branch(f"{st.session_state['branch_name']}-test")
+
+                        # Debug: Show full branch response
+                        with st.expander("🔧 Debug: Test Branch Response", expanded=True):
+                            st.json(test_branch)
+
                         test_branch_id = test_branch.get('id') or test_branch.get('branchId')
 
                         # Check if branch already existed (has configs)

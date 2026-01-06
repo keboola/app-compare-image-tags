@@ -176,7 +176,14 @@ def validate_and_proceed(
     """
     with st.spinner("Validating configuration..."):
         try:
-            client = KeboolaAPIClient(token_override=user_token)
+            # Extract KBC URL from config input if it's a URL
+            kbc_url = None
+            if config_input and config_input.startswith('http'):
+                parts = config_input.split('/')
+                if len(parts) >= 3:
+                    kbc_url = f"{parts[0]}//{parts[2]}"
+
+            client = KeboolaAPIClient(token_override=user_token, kbc_url_override=kbc_url)
 
             # Fetch config to validate it exists
             if component_id:

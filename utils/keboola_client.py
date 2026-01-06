@@ -373,14 +373,14 @@ class KeboolaAPIClient:
 
     def create_branch(self, name: str, description: str = None) -> Dict[str, Any]:
         """
-        Create a new development branch.
+        Create a new development branch and wait for creation to complete.
 
         Args:
             name: Branch name
             description: Branch description (optional)
 
         Returns:
-            Created branch dictionary
+            Created branch dictionary (not the job response!)
         """
         url = f"{self.storage_url}/v2/storage/dev-branches"
 
@@ -404,7 +404,38 @@ class KeboolaAPIClient:
             except:
                 raise ValueError(f"Branch creation failed with status {response.status_code}: {response.text}")
 
-        return response.json()
+        # The response is a JOB, not the branch!
+        job_response = response.json()
+        job_id = job_response['id']
+
+        # Wait for the branch creation job to complete and find the branch
+        max_attempts = 300  # 300 * 2 seconds = 10 minutes
+        for attempt in range(max_attempts):
+            time.sleep(2)
+
+            # Clear cache and get fresh branch list
+            st.cache_data.clear()
+            branches = self.list_branches()
+
+            # Debug: Log polling attempt (every 10 seconds)
+            if attempt % 5 == 0:
+                try:
+                    with st.expander(f"🔍 Branch creation polling attempt {attempt + 1}/{max_attempts}", expanded=False):
+                        st.write(f"Job ID: {job_id}")
+                        st.write(f"Looking for branch: '{name}'")
+                        st.write(f"Found {len(branches)} total branches")
+                        branch_names = [b.get('name') for b in branches]
+                        st.write(f"Branch names: {branch_names}")
+                except:
+                    pass  # Ignore if we can't show debug info
+
+            # Look for the branch by name
+            for branch in branches:
+                if branch['name'] == name:
+                    return branch
+
+        # If we get here, branch creation timed out
+        raise TimeoutError(f"Branch creation job {job_id} completed but branch '{name}' not found after 10 minutes")
 
     def get_or_create_branch(self, name: str) -> Dict[str, Any]:
         """
