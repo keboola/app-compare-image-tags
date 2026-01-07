@@ -13,7 +13,7 @@ from utils.visualization import (
     display_bucket_comparison,
     display_table_comparison,
     display_metadata_differences,
-    display_row_differences
+    display_row_differences,
 )
 
 
@@ -21,7 +21,9 @@ def create_results_page():
     """Create and display the results page."""
     st.title("📊 Comparison Results")
 
-    results = st.session_state.get('comparison_results')
+    show_advanced = st.session_state.get("show_advanced", False)
+
+    results = st.session_state.get("comparison_results")
 
     if not results:
         st.warning("⚠️ No comparison results available. Please complete the execution phase.")
@@ -37,49 +39,83 @@ def create_results_page():
             st.rerun()
 
     # Display comparison execution log if available
-    if st.session_state.get('comparison_logs'):
+    if show_advanced and st.session_state.get("comparison_logs"):
         with st.expander("📋 Comparison Execution Log", expanded=False):
-            logs = st.session_state.get('comparison_logs', [])
+            logs = st.session_state.get("comparison_logs", [])
             for log in logs:
-                timestamp = log['timestamp']
-                message = log['message']
-                level = log['level']
+                timestamp = log["timestamp"]
+                message = log["message"]
+                level = log["level"]
 
-                if level == 'success':
+                if level == "success":
                     st.success(f"[{timestamp}] {message}")
-                elif level == 'warning':
+                elif level == "warning":
                     st.warning(f"[{timestamp}] {message}")
-                elif level == 'error':
+                elif level == "error":
                     st.error(f"[{timestamp}] {message}")
                 else:
                     st.info(f"[{timestamp}] {message}")
 
     # Debug: Show raw results structure
-    with st.expander("🔧 Debug: Raw Comparison Results", expanded=False):
-        st.json(results)
+    if show_advanced:
+        with st.expander("🔧 Debug: Raw Comparison Results", expanded=False):
+            st.json(results)
 
-    # Display configuration info at the top
+    # Display comparison details based on mode
+    comparison_mode = st.session_state.get("comparison_mode")
+
     with st.expander("ℹ️ Comparison Details", expanded=False):
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**Production Configuration:**")
-            st.text(f"Config ID: {st.session_state.get('config_id')}")
-            st.text(f"Image Tag: {st.session_state.get('production_image_tag')}")
-            st.text(f"Branch: {st.session_state.get('branch_name')}-production")
-        with col2:
-            st.markdown("**Test Configuration:**")
-            st.text(f"Config ID: {st.session_state.get('config_id')}")
-            st.text(f"Image Tag: {st.session_state.get('test_image_tag')}")
-            st.text(f"Branch: {st.session_state.get('branch_name')}-test")
+        if comparison_mode == "config":
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("**Production Configuration:**")
+                st.text(f"Config ID: {st.session_state.get('config_id')}")
+                st.text(f"Image Tag: {st.session_state.get('production_image_tag')}")
+                st.text(f"Branch: {st.session_state.get('branch_name')}-production")
+            with col2:
+                st.markdown("**Test Configuration:**")
+                st.text(f"Config ID: {st.session_state.get('config_id')}")
+                st.text(f"Image Tag: {st.session_state.get('test_image_tag')}")
+                st.text(f"Branch: {st.session_state.get('branch_name')}-test")
+
+        elif comparison_mode == "tables":
+            st.markdown("**Comparison Mode:** Table Comparison")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("**Production Branch:**")
+                st.text(f"Name: {st.session_state.get('production_branch_name')}")
+                st.text(f"ID: {st.session_state.get('production_branch_id')}")
+            with col2:
+                st.markdown("**Test Branch:**")
+                st.text(f"Name: {st.session_state.get('test_branch_name')}")
+                st.text(f"ID: {st.session_state.get('test_branch_id')}")
+
+            st.markdown(f"**Tables Compared:** {len(st.session_state.get('table_ids_to_compare', []))}")
+            with st.expander("View table list"):
+                for table_id in st.session_state.get("table_ids_to_compare", []):
+                    st.text(f"  • {table_id}")
+
+        elif comparison_mode == "buckets":
+            st.markdown("**Comparison Mode:** Bucket Comparison")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("**Production Branch:**")
+                st.text(f"Name: {st.session_state.get('production_branch_name')}")
+                st.text(f"ID: {st.session_state.get('production_branch_id')}")
+            with col2:
+                st.markdown("**Test Branch:**")
+                st.text(f"Name: {st.session_state.get('test_branch_name')}")
+                st.text(f"ID: {st.session_state.get('test_branch_id')}")
+
+            st.markdown(f"**Buckets Compared:** {len(st.session_state.get('bucket_ids_to_compare', []))}")
+            with st.expander("View bucket list"):
+                for bucket_id in st.session_state.get("bucket_ids_to_compare", []):
+                    st.text(f"  • {bucket_id}")
 
     st.markdown("---")
 
     # Tab navigation
-    tab1, tab2, tab3 = st.tabs([
-        "📋 Summary",
-        "🗂️ Structure & Metadata",
-        "🔍 Row Differences"
-    ])
+    tab1, tab2, tab3 = st.tabs(["📋 Summary", "🗂️ Structure & Metadata", "🔍 Row Differences"])
 
     with tab1:
         display_summary_tab(results)
@@ -99,18 +135,19 @@ def display_summary_tab(results: dict):
         results: Full comparison results dictionary
     """
     # Safety check for summary
-    if 'summary' not in results:
+    if "summary" not in results:
         st.error("❌ Summary data missing from comparison results")
         return
 
-    summary = results['summary']
+    summary = results["summary"]
 
     # Debug: Show summary structure
-    with st.expander("🔧 Debug: Summary Data", expanded=False):
-        st.json(summary)
+    if st.session_state.get("show_advanced", False):
+        with st.expander("🔧 Debug: Summary Data", expanded=False):
+            st.json(summary)
 
     # Overall status banner
-    if summary.get('overall_status') == 'match':
+    if summary.get("overall_status") == "match":
         st.success("✅ Outputs match perfectly!")
         st.balloons()
     else:
@@ -123,16 +160,16 @@ def display_summary_tab(results: dict):
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        st.metric("Total Buckets", summary.get('total_buckets', 0))
+        st.metric("Total Buckets", summary.get("total_buckets", 0))
     with col2:
-        st.metric("Matching Buckets", summary.get('matching_buckets', 0))
+        st.metric("Matching Buckets", summary.get("matching_buckets", 0))
     with col3:
-        st.metric("Total Tables", summary.get('total_tables', 0))
+        st.metric("Total Tables", summary.get("total_tables", 0))
     with col4:
-        st.metric("Matching Tables", summary.get('matching_tables', 0))
+        st.metric("Matching Tables", summary.get("matching_tables", 0))
 
     # Difference breakdown
-    if summary['overall_status'] != 'match':
+    if summary["overall_status"] != "match":
         st.markdown("---")
         st.subheader("Difference Breakdown")
         display_summary_metrics(summary)
@@ -141,7 +178,7 @@ def display_summary_tab(results: dict):
     st.markdown("---")
     st.subheader("Key Findings")
 
-    for i, finding in enumerate(summary['key_findings'], 1):
+    for i, finding in enumerate(summary["key_findings"], 1):
         st.markdown(f"{i}. {finding}")
 
 
@@ -153,21 +190,21 @@ def display_structure_tab(results: dict):
         results: Full comparison results dictionary
     """
     st.subheader("🪣 Bucket Comparison")
-    display_bucket_comparison(results['bucket_comparison'])
+    display_bucket_comparison(results["bucket_comparison"])
 
     st.markdown("---")
 
     st.subheader("📊 Table Comparison")
-    if results['table_comparison']:
-        display_table_comparison(results['table_comparison'])
+    if results["table_comparison"]:
+        display_table_comparison(results["table_comparison"])
     else:
         st.info("No common buckets to compare tables")
 
     st.markdown("---")
 
     st.subheader("📋 Metadata Comparison")
-    if results['metadata_comparison']:
-        display_metadata_differences(results['metadata_comparison'])
+    if results["metadata_comparison"]:
+        display_metadata_differences(results["metadata_comparison"])
     else:
         st.info("No common tables to compare metadata")
 
@@ -179,17 +216,14 @@ def display_differences_tab(results: dict):
     Args:
         results: Full comparison results dictionary
     """
-    row_diffs = results['row_differences']
+    row_diffs = results["row_differences"]
 
     if not row_diffs:
         st.info("No row-level comparison data available")
         return
 
     # Filter tables with differences
-    tables_with_diffs = [
-        table for table, diff in row_diffs.items()
-        if diff.get('status') == 'differ'
-    ]
+    tables_with_diffs = [table for table, diff in row_diffs.items() if diff.get("status") == "differ"]
 
     if not tables_with_diffs:
         st.success("✅ No row-level differences found!")
@@ -199,11 +233,7 @@ def display_differences_tab(results: dict):
     st.subheader(f"🔍 Row-Level Differences ({len(tables_with_diffs)} tables)")
 
     # Table selector
-    selected_table = st.selectbox(
-        "Select table to view differences:",
-        options=tables_with_diffs,
-        index=0
-    )
+    selected_table = st.selectbox("Select table to view differences:", options=tables_with_diffs, index=0)
 
     if selected_table:
         st.markdown(f"### {selected_table}")
@@ -217,14 +247,17 @@ def display_differences_tab(results: dict):
     summary_data = []
     for table in tables_with_diffs:
         diff = row_diffs[table]
-        summary_data.append({
-            'Table': table,
-            'Total Rows': diff.get('total_rows_compared', 0),
-            'Differing Rows': diff.get('differing_rows', 0),
-            'Differing Columns': len(diff.get('column_differences', {}))
-        })
+        summary_data.append(
+            {
+                "Table": table,
+                "Total Rows": diff.get("total_rows_compared", 0),
+                "Differing Rows": diff.get("differing_rows", 0),
+                "Differing Columns": len(diff.get("column_differences", {})),
+            }
+        )
 
     if summary_data:
         import pandas as pd
+
         summary_df = pd.DataFrame(summary_data)
         st.dataframe(summary_df, use_container_width=True)

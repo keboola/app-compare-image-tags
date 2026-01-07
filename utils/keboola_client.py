@@ -35,33 +35,34 @@ class KeboolaAPIClient:
         if not self.storage_url:
             try:
                 import streamlit as st
-                config_input = st.session_state.get('config_input', '')
-                if config_input and config_input.startswith('http'):
+
+                config_input = st.session_state.get("config_input", "")
+                if config_input and config_input.startswith("http"):
                     # Extract base URL from config URL
                     # e.g., https://connection.keboola.com/admin/projects/... -> https://connection.keboola.com
-                    parts = config_input.split('/')
+                    parts = config_input.split("/")
                     if len(parts) >= 3:
                         self.storage_url = f"{parts[0]}//{parts[2]}"
             except Exception:
                 pass
 
         if not self.storage_url:
-            raise ValueError("KBC_URL must be configured in secrets.toml or provided via kbc_url_override, or pass a full configuration URL through the UI")
+            raise ValueError(
+                "KBC_URL must be configured in secrets.toml or provided via kbc_url_override, or pass a full configuration URL through the UI"
+            )
 
         if not self.token:
             raise ValueError("KBC_TOKEN must be configured in secrets.toml or provided via token_override")
 
         # Trim trailing slashes from storage URL
-        self.storage_url = self.storage_url.rstrip('/')
+        self.storage_url = self.storage_url.rstrip("/")
 
         # Derive queue URL from storage URL
         # Example: https://connection.north-europe.azure.keboola.com -> https://queue.north-europe.azure.keboola.com
         region_part = self.storage_url.split("//")[1]  # "connection.north-europe.azure.keboola.com"
         self.queue_url = f"https://queue.{'.'.join(region_part.split('.')[1:])}"
 
-        self.headers = {
-            "X-StorageApi-Token": self.token
-        }
+        self.headers = {"X-StorageApi-Token": self.token}
 
     # ==================== Configuration Management ====================
 
@@ -82,7 +83,7 @@ class KeboolaAPIClient:
         response.raise_for_status()
 
         config = response.json()
-        config['component'] = component_id
+        config["component"] = component_id
         return config
 
     @st.cache_data(ttl=3600)
@@ -106,20 +107,22 @@ class KeboolaAPIClient:
 
         # Search for the config across all components
         for component in components:
-            component_id = component['id']
+            component_id = component["id"]
             config_url = f"{_self.storage_url}/v2/storage/components/{component_id}/configs/{config_id}"
             try:
                 config_response = requests.get(config_url, headers=_self.headers)
                 if config_response.status_code == 200:
                     config = config_response.json()
-                    config['component'] = component_id
+                    config["component"] = component_id
                     return config
             except:
                 continue
 
         raise ValueError(f"Configuration {config_id} not found in any component")
 
-    def create_configuration(self, component_id: str, name: str, description: str, configuration: Dict, branch_id: Optional[str] = None) -> Dict[str, Any]:
+    def create_configuration(
+        self, component_id: str, name: str, description: str, configuration: Dict, branch_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         Create a new configuration.
 
@@ -139,22 +142,16 @@ class KeboolaAPIClient:
         else:
             url = f"{self.storage_url}/v2/storage/components/{component_id}/configs"
 
-        data = {
-            'name': name,
-            'description': description,
-            'configuration': json.dumps(configuration)
-        }
+        data = {"name": name, "description": description, "configuration": json.dumps(configuration)}
 
-        response = requests.post(
-            url,
-            headers=self.headers,
-            data=data
-        )
+        response = requests.post(url, headers=self.headers, data=data)
 
         if not response.ok:
             try:
                 error_detail = response.json()
-                raise ValueError(f"Configuration creation failed ({response.status_code}): {error_detail.get('error', error_detail.get('message', response.text))}")
+                raise ValueError(
+                    f"Configuration creation failed ({response.status_code}): {error_detail.get('error', error_detail.get('message', response.text))}"
+                )
             except ValueError:
                 raise
             except:
@@ -162,7 +159,9 @@ class KeboolaAPIClient:
 
         return response.json()
 
-    def update_configuration(self, component_id: str, config_id: str, configuration: Dict, branch_id: Optional[str] = None) -> Dict[str, Any]:
+    def update_configuration(
+        self, component_id: str, config_id: str, configuration: Dict, branch_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         Update an existing configuration.
 
@@ -181,19 +180,15 @@ class KeboolaAPIClient:
         else:
             url = f"{self.storage_url}/v2/storage/components/{component_id}/configs/{config_id}"
 
-        data = {
-            'configuration': json.dumps(configuration)
-        }
+        data = {"configuration": json.dumps(configuration)}
 
-        response = requests.put(
-            url,
-            headers=self.headers,
-            data=data
-        )
+        response = requests.put(url, headers=self.headers, data=data)
         response.raise_for_status()
         return response.json()
 
-    def update_configuration_tag(self, component_id: str, config_id: str, config_data: Dict, new_tag: str, branch_id: Optional[str] = None) -> Dict[str, Any]:
+    def update_configuration_tag(
+        self, component_id: str, config_id: str, config_data: Dict, new_tag: str, branch_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         Update an existing configuration's image tag in a branch.
 
@@ -208,22 +203,22 @@ class KeboolaAPIClient:
             Updated configuration dictionary
         """
         import copy
+
         updated_config = copy.deepcopy(config_data)
 
         # Ensure runtime object exists and set image_tag
-        if 'runtime' not in updated_config:
-            updated_config['runtime'] = {}
+        if "runtime" not in updated_config:
+            updated_config["runtime"] = {}
 
-        updated_config['runtime']['image_tag'] = new_tag
+        updated_config["runtime"]["image_tag"] = new_tag
 
         return self.update_configuration(
-            component_id=component_id,
-            config_id=config_id,
-            configuration=updated_config,
-            branch_id=branch_id
+            component_id=component_id, config_id=config_id, configuration=updated_config, branch_id=branch_id
         )
 
-    def duplicate_configuration_with_tag(self, original_config: Dict, new_tag: str, branch_id: Optional[str] = None) -> Dict[str, Any]:
+    def duplicate_configuration_with_tag(
+        self, original_config: Dict, new_tag: str, branch_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         Duplicate a configuration with a new image tag.
 
@@ -236,14 +231,15 @@ class KeboolaAPIClient:
             Created configuration dictionary
         """
         import copy
-        component_id = original_config['component']
-        config_data = copy.deepcopy(original_config['configuration'])
+
+        component_id = original_config["component"]
+        config_data = copy.deepcopy(original_config["configuration"])
 
         # Ensure runtime object exists and set image_tag
-        if 'runtime' not in config_data:
-            config_data['runtime'] = {}
+        if "runtime" not in config_data:
+            config_data["runtime"] = {}
 
-        config_data['runtime']['image_tag'] = new_tag
+        config_data["runtime"]["image_tag"] = new_tag
 
         # Create new configuration
         new_name = f"{original_config['name']} - Test ({new_tag})"
@@ -254,7 +250,7 @@ class KeboolaAPIClient:
             name=new_name,
             description=new_description,
             configuration=config_data,
-            branch_id=branch_id
+            branch_id=branch_id,
         )
 
     # ==================== Branch Management ====================
@@ -322,7 +318,9 @@ class KeboolaAPIClient:
         response.raise_for_status()
         return response.json()
 
-    def get_configuration_in_branch(self, component_id: str, config_id: str, branch_id: Optional[str] = None) -> Dict[str, Any]:
+    def get_configuration_in_branch(
+        self, component_id: str, config_id: str, branch_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         Get configuration from a specific branch (for verification).
 
@@ -363,7 +361,7 @@ class KeboolaAPIClient:
 
             # Check if branch is ready (no longer in creating state)
             # Branch is ready when it has metadata populated
-            if branch.get('isDefault') is not None:
+            if branch.get("isDefault") is not None:
                 return branch
 
             if time.time() - start_time > timeout:
@@ -384,29 +382,27 @@ class KeboolaAPIClient:
         """
         url = f"{self.storage_url}/v2/storage/dev-branches"
 
-        payload = {'name': name}
+        payload = {"name": name}
         if description:
-            payload['description'] = description
+            payload["description"] = description
 
         headers = self.headers.copy()
-        headers['Content-Type'] = 'application/json'
+        headers["Content-Type"] = "application/json"
 
-        response = requests.post(
-            url,
-            headers=headers,
-            json=payload
-        )
+        response = requests.post(url, headers=headers, json=payload)
 
         if not response.ok:
             try:
                 error_detail = response.json()
-                raise ValueError(f"Branch creation failed: {error_detail.get('error', error_detail.get('message', response.text))}")
+                raise ValueError(
+                    f"Branch creation failed: {error_detail.get('error', error_detail.get('message', response.text))}"
+                )
             except:
                 raise ValueError(f"Branch creation failed with status {response.status_code}: {response.text}")
 
         # The response is a JOB, not the branch!
         job_response = response.json()
-        job_id = job_response['id']
+        job_id = job_response["id"]
 
         # Wait for the branch creation job to complete and find the branch
         max_attempts = 300  # 300 * 2 seconds = 10 minutes
@@ -420,18 +416,20 @@ class KeboolaAPIClient:
             # Debug: Log polling attempt (every 10 seconds)
             if attempt % 5 == 0:
                 try:
-                    with st.expander(f"🔍 Branch creation polling attempt {attempt + 1}/{max_attempts}", expanded=False):
+                    with st.expander(
+                        f"🔍 Branch creation polling attempt {attempt + 1}/{max_attempts}", expanded=False
+                    ):
                         st.write(f"Job ID: {job_id}")
                         st.write(f"Looking for branch: '{name}'")
                         st.write(f"Found {len(branches)} total branches")
-                        branch_names = [b.get('name') for b in branches]
+                        branch_names = [b.get("name") for b in branches]
                         st.write(f"Branch names: {branch_names}")
                 except:
                     pass  # Ignore if we can't show debug info
 
             # Look for the branch by name
             for branch in branches:
-                if branch['name'] == name:
+                if branch["name"] == name:
                     return branch
 
         # If we get here, branch creation timed out
@@ -454,7 +452,7 @@ class KeboolaAPIClient:
 
         # Check if branch exists
         for branch in branches:
-            if branch['name'] == name:
+            if branch["name"] == name:
                 return branch
 
         # Try to create, but handle case where it already exists
@@ -466,7 +464,7 @@ class KeboolaAPIClient:
                 st.cache_data.clear()
                 branches = self.list_branches()
                 for branch in branches:
-                    if branch['name'] == name:
+                    if branch["name"] == name:
                         return branch
                 # If still not found, re-raise the error
                 raise
@@ -500,10 +498,11 @@ class KeboolaAPIClient:
         response.raise_for_status()
 
         all_buckets = response.json()
-        bucket_ids = [bucket['id'] for bucket in all_buckets]
+        bucket_ids = [bucket["id"] for bucket in all_buckets]
 
         # Debug: Show what we got
         import streamlit as st
+
         st.write(f"🔍 **Total buckets in project:** {len(bucket_ids)}")
         st.write(f"🔍 **Branch ID (type={type(branch_id).__name__}):** {branch_id}")
 
@@ -513,7 +512,8 @@ class KeboolaAPIClient:
             # We need to filter for pattern and strip the branch ID from the middle
 
             import re
-            pattern = re.compile(rf'^(in|out)\.c-{branch_id}-(.+)$')
+
+            pattern = re.compile(rf"^(in|out)\.c-{branch_id}-(.+)$")
             st.write(f"🔍 **Looking for pattern:** `{{stage}}.c-{branch_id}-{{bucket_name}}`")
 
             # Show which buckets match
@@ -540,10 +540,8 @@ class KeboolaAPIClient:
         else:
             # For default branch, return buckets without any numeric prefix pattern
             import re
-            default_buckets = [
-                bucket_id for bucket_id in bucket_ids
-                if not re.match(r'^\d+-', bucket_id)
-            ]
+
+            default_buckets = [bucket_id for bucket_id in bucket_ids if not re.match(r"^\d+-", bucket_id)]
             st.write(f"🔍 **Default branch buckets:** {len(default_buckets)}")
             return default_buckets
 
@@ -567,7 +565,7 @@ class KeboolaAPIClient:
         # Pattern: bucket_id="in.c-mybucket" -> full_bucket_id="in.c-20533-mybucket"
         if branch_id:
             # Split bucket_id: "in.c-mybucket" -> "in.c-" + "mybucket"
-            parts = bucket_id.split('.c-', 1)
+            parts = bucket_id.split(".c-", 1)
             if len(parts) == 2:
                 stage = parts[0]  # "in" or "out"
                 bucket_name = parts[1]  # "mybucket"
@@ -584,7 +582,7 @@ class KeboolaAPIClient:
         response.raise_for_status()
 
         bucket = response.json()
-        return [table['name'] for table in bucket.get('tables', [])]
+        return [table["name"] for table in bucket.get("tables", [])]
 
     @st.cache_data(ttl=300)
     def get_table_detail(_self, table_id: str, branch_id: Optional[str] = None) -> Dict[str, Any]:
@@ -606,8 +604,8 @@ class KeboolaAPIClient:
         # Pattern: "in.c-bucket.table" -> "in.c-20533-bucket.table"
         if branch_id:
             # Split: "in.c-bucket.table" -> ["in", "c-bucket", "table"]
-            parts = table_id.split('.')
-            if len(parts) == 3 and parts[1].startswith('c-'):
+            parts = table_id.split(".")
+            if len(parts) == 3 and parts[1].startswith("c-"):
                 stage = parts[0]  # "in" or "out"
                 bucket_name = parts[1][2:]  # "bucket" (strip "c-")
                 table_name = parts[2]  # "table"
@@ -628,6 +626,7 @@ class KeboolaAPIClient:
         # Debug: Verify we got a dict
         if not isinstance(result, dict):
             import streamlit as st
+
             st.error(f"❌ API returned non-dict for table {full_table_id}: {type(result)}")
             st.write("Response:", result)
             raise ValueError(f"get_table_detail expected dict, got {type(result)}: {result}")
@@ -650,25 +649,19 @@ class KeboolaAPIClient:
         """
         url = f"{self.queue_url}/jobs"
 
-        payload = {
-            "mode": "run",
-            "component": component_id,
-            "config": config_id
-        }
+        payload = {"mode": "run", "component": component_id, "config": config_id}
 
         if branch_id:
             payload["branchId"] = str(branch_id)
 
-        response = requests.post(
-            url,
-            headers={**self.headers, "Content-Type": "application/json"},
-            json=payload
-        )
+        response = requests.post(url, headers={**self.headers, "Content-Type": "application/json"}, json=payload)
 
         if not response.ok:
             try:
                 error_detail = response.json()
-                raise ValueError(f"Job creation failed: {error_detail.get('error', error_detail.get('message', response.text))}")
+                raise ValueError(
+                    f"Job creation failed: {error_detail.get('error', error_detail.get('message', response.text))}"
+                )
             except ValueError:
                 raise
             except:
@@ -711,7 +704,7 @@ class KeboolaAPIClient:
         while True:
             status = self.get_job_status(job_id)
 
-            if status['status'] in ['success', 'error', 'cancelled', 'terminated']:
+            if status["status"] in ["success", "error", "cancelled", "terminated"]:
                 return status
 
             if time.time() - start_time > timeout:
@@ -723,10 +716,7 @@ class KeboolaAPIClient:
 
     @st.cache_data(ttl=300)
     def query_table_data(
-        _self,
-        table_id: str,
-        branch_id: Optional[str] = None,
-        limit: Optional[int] = None
+        _self, table_id: str, branch_id: Optional[str] = None, limit: Optional[int] = None
     ) -> pd.DataFrame:
         """
         Query table data via Workspace API.
@@ -752,8 +742,8 @@ class KeboolaAPIClient:
         # Pattern: "in.c-bucket.table" -> "in.c-20533-bucket.table"
         if branch_id:
             # Split: "in.c-bucket.table" -> ["in", "c-bucket", "table"]
-            parts = table_id.split('.')
-            if len(parts) == 3 and parts[1].startswith('c-'):
+            parts = table_id.split(".")
+            if len(parts) == 3 and parts[1].startswith("c-"):
                 stage = parts[0]  # "in" or "out"
                 bucket_name = parts[1][2:]  # "bucket" (strip "c-")
                 table_name = parts[2]  # "table"
@@ -765,32 +755,189 @@ class KeboolaAPIClient:
             full_table_id = table_id
 
         # Build SQL query with prefixed table ID
-        parts = full_table_id.split('.')
+        parts = full_table_id.split(".")
         if len(parts) == 3:
             bucket, table = parts[1], parts[2]
             qualified_name = f'"{parts[0]}"."{bucket}"."{table}"'
         else:
             qualified_name = f'"{full_table_id}"'
 
-        query = f'SELECT * FROM {qualified_name}'
+        query = f"SELECT * FROM {qualified_name}"
         if limit:
-            query += f' LIMIT {limit}'
+            query += f" LIMIT {limit}"
 
         headers = _self.headers.copy()
-        headers['Content-Type'] = 'application/json'
+        headers["Content-Type"] = "application/json"
 
-        response = requests.post(
-            url,
-            headers=headers,
-            json={"query": query}
-        )
+        response = requests.post(url, headers=headers, json={"query": query})
         response.raise_for_status()
 
         result = response.json()
 
         # Convert to DataFrame
-        if 'rows' in result:
-            df = pd.DataFrame(result['rows'], columns=result.get('columns', []))
+        if "rows" in result:
+            df = pd.DataFrame(result["rows"], columns=result.get("columns", []))
             return df
         else:
             return pd.DataFrame()
+
+    def execute_query(_self, query: str, return_dataframe: bool = True):
+        """
+        Execute a custom SQL query via Workspace API.
+
+        Args:
+            query: SQL query to execute
+            return_dataframe: If True, returns DataFrame; if False, returns raw result dict
+
+        Returns:
+            DataFrame or dict with query results
+        """
+        if not _self.workspace_id:
+            raise ValueError("KBC_WORKSPACE_ID must be configured for queries")
+
+        url = f"{_self.storage_url}/v2/storage/workspaces/{_self.workspace_id}/query"
+
+        headers = _self.headers.copy()
+        headers["Content-Type"] = "application/json"
+
+        response = requests.post(url, headers=headers, json={"query": query})
+        response.raise_for_status()
+
+        result = response.json()
+
+        if return_dataframe:
+            if "rows" in result:
+                df = pd.DataFrame(result["rows"], columns=result.get("columns", []))
+                return df
+            else:
+                return pd.DataFrame()
+        else:
+            return result
+
+    def get_table_data_preview(self, table_id: str, branch_id: Optional[str] = None, limit: int = 100) -> pd.DataFrame:
+        """
+        Get table data preview (Storage API, no workspace required).
+
+        Args:
+            table_id: Table ID
+            branch_id: Branch ID
+            limit: Rows limit (max 1000 usually)
+
+        Returns:
+            DataFrame with preview data
+        """
+        # CRITICAL FIX: Convert branch_id to string if provided
+        if branch_id is not None:
+            branch_id = str(branch_id)
+
+        # Handle branch logic for table ID
+        if branch_id:
+            # Logic to construct full ID if needed, similar to other methods
+            # But data-preview endpoint usually takes the ID as known in that context?
+            # Wait, storage API for branches handles components/configs, but for tables/buckets?
+            # Actually, simpler: Use standard table detail logic to get full ID, then call preview
+
+            # Re-use logic from get_table_detail to build full_table_id
+            # Pattern: "in.c-bucket.table" -> "in.c-20533-bucket.table"
+            parts = table_id.split(".")
+            if len(parts) == 3 and parts[1].startswith("c-"):
+                stage = parts[0]
+                bucket_name = parts[1][2:]
+                table_name = parts[2]
+                full_table_id = f"{stage}.c-{branch_id}-{bucket_name}.{table_name}"
+            else:
+                full_table_id = f"{branch_id}-{table_id}"
+        else:
+            full_table_id = table_id
+
+        url = f"{self.storage_url}/v2/storage/tables/{full_table_id}/data-preview"
+        params = {"limit": limit, "format": "json"}
+
+        response = requests.get(url, headers=self.headers, params=params)
+        response.raise_for_status()
+
+        data = response.json()
+
+        # Convert to DataFrame
+        # Response format: {"columns": ["col1", "col2"], "rows": [{"col1": "val1", ...}]}
+        if "rows" in data and len(data["rows"]) > 0:
+            # Rows can be list of dicts (JSON) or list of lists (JSON arrays)
+            rows = data["rows"]
+            flattened_rows = []
+
+            first_row = rows[0]
+
+            if isinstance(first_row, dict):
+                # Handle list of dicts
+                for row in rows:
+                    flat_row = {}
+                    for key, val in row.items():
+                        if isinstance(val, dict) and "value" in val:
+                            flat_row[key] = val["value"]
+                        else:
+                            flat_row[key] = val
+                    flattened_rows.append(flat_row)
+            elif isinstance(first_row, list):
+                # Handle list of lists
+                for row in rows:
+                    flat_row = []
+                    for val in row:
+                        if isinstance(val, dict) and "value" in val:
+                            flat_row.append(val["value"])
+                        else:
+                            flat_row.append(val)
+                    flattened_rows.append(flat_row)
+            else:
+                # Fallback for simple values
+                flattened_rows = rows
+
+            if "columns" in data:
+                # Extract column names safely (handle if they are dicts)
+                columns = []
+                for col in data["columns"]:
+                    if isinstance(col, dict):
+                        columns.append(col.get("name", str(col)))
+                    else:
+                        columns.append(str(col))
+
+                # Ensure correct column order
+                return pd.DataFrame(flattened_rows, columns=columns)
+            else:
+                return pd.DataFrame(flattened_rows)
+        return pd.DataFrame()
+
+    def get_qualified_table_name(_self, table_id: str, branch_id: Optional[str] = None) -> str:
+        """
+        Get fully qualified table name for SQL queries.
+
+        Args:
+            table_id: Table ID without branch prefix (e.g., "in.c-bucket.table")
+            branch_id: Branch ID (None for default branch)
+
+        Returns:
+            Qualified table name for SQL queries (e.g., "in"."c-20533-bucket"."table")
+        """
+        # CRITICAL FIX: Convert branch_id to string if provided
+        if branch_id is not None:
+            branch_id = str(branch_id)
+
+        # Add branch ID to table_id if in dev branch
+        if branch_id:
+            parts = table_id.split(".")
+            if len(parts) == 3 and parts[1].startswith("c-"):
+                stage = parts[0]  # "in" or "out"
+                bucket_name = parts[1][2:]  # "bucket" (strip "c-")
+                table_name = parts[2]  # "table"
+                full_table_id = f"{stage}.c-{branch_id}-{bucket_name}.{table_name}"
+            else:
+                # Fallback
+                full_table_id = f"{branch_id}-{table_id}"
+        else:
+            full_table_id = table_id
+
+        # Build qualified name
+        parts = full_table_id.split(".")
+        if len(parts) == 3:
+            return f'"{parts[0]}"."{parts[1]}"."{parts[2]}"'
+        else:
+            return f'"{full_table_id}"'

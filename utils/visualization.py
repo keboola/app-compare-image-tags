@@ -22,13 +22,8 @@ def display_status_indicator(status: str) -> str:
     Returns:
         Emoji string
     """
-    status_map = {
-        'match': '✅',
-        'differ': '⚠️',
-        'error': '❌',
-        'skipped': '⏭️'
-    }
-    return status_map.get(status, '❓')
+    status_map = {"match": "✅", "differ": "⚠️", "error": "❌", "skipped": "⏭️"}
+    return status_map.get(status, "❓")
 
 
 def display_bucket_comparison(comparison: Dict[str, Any]):
@@ -43,24 +38,24 @@ def display_bucket_comparison(comparison: Dict[str, Any]):
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        st.metric("Common Buckets", len(comparison['common']))
-        if comparison['common']:
+        st.metric("Common Buckets", len(comparison["common"]))
+        if comparison["common"]:
             with st.expander("View common buckets"):
-                for bucket in comparison['common']:
+                for bucket in comparison["common"]:
                     st.text(f"✅ {bucket}")
 
     with col2:
-        st.metric("Production Only", len(comparison['production_only']))
-        if comparison['production_only']:
+        st.metric("Production Only", len(comparison["production_only"]))
+        if comparison["production_only"]:
             with st.expander("View production-only buckets"):
-                for bucket in comparison['production_only']:
+                for bucket in comparison["production_only"]:
                     st.text(f"🔵 {bucket}")
 
     with col3:
-        st.metric("Test Only", len(comparison['test_only']))
-        if comparison['test_only']:
+        st.metric("Test Only", len(comparison["test_only"]))
+        if comparison["test_only"]:
             with st.expander("View test-only buckets"):
-                for bucket in comparison['test_only']:
+                for bucket in comparison["test_only"]:
                     st.text(f"🟢 {bucket}")
 
 
@@ -73,7 +68,7 @@ def display_table_comparison(comparison: Dict[str, Any]):
     """
     for bucket, tables in comparison.items():
         with st.expander(f"📂 {bucket} - {display_status_indicator(tables['status'])} {tables['status'].upper()}"):
-            if not tables['common'] and not tables['production_only'] and not tables['test_only']:
+            if not tables["common"] and not tables["production_only"] and not tables["test_only"]:
                 st.info("No tables in this bucket")
                 continue
 
@@ -81,24 +76,24 @@ def display_table_comparison(comparison: Dict[str, Any]):
 
             with col1:
                 st.markdown("**Common Tables**")
-                if tables['common']:
-                    for table in tables['common']:
+                if tables["common"]:
+                    for table in tables["common"]:
                         st.text(f"✅ {table}")
                 else:
                     st.text("None")
 
             with col2:
                 st.markdown("**Production Only**")
-                if tables['production_only']:
-                    for table in tables['production_only']:
+                if tables["production_only"]:
+                    for table in tables["production_only"]:
                         st.text(f"🔵 {table}")
                 else:
                     st.text("None")
 
             with col3:
                 st.markdown("**Test Only**")
-                if tables['test_only']:
-                    for table in tables['test_only']:
+                if tables["test_only"]:
+                    for table in tables["test_only"]:
                         st.text(f"🟢 {table}")
                 else:
                     st.text("None")
@@ -112,11 +107,7 @@ def display_metadata_differences(comparison: Dict[str, Any]):
         comparison: Metadata comparison dictionary (per table)
     """
     # Filter tables with differences
-    differing_tables = {
-        table_id: meta
-        for table_id, meta in comparison.items()
-        if meta.get('status') == 'differ'
-    }
+    differing_tables = {table_id: meta for table_id, meta in comparison.items() if meta.get("status") == "differ"}
 
     if not differing_tables:
         st.success("✅ All table metadata matches perfectly!")
@@ -127,50 +118,89 @@ def display_metadata_differences(comparison: Dict[str, Any]):
     for table_id, meta in differing_tables.items():
         with st.expander(f"📊 {table_id}"):
             # Primary Keys
-            if not meta['primary_keys']['match']:
-                st.markdown("**Primary Keys Differ:**")
+            if not meta["primary_keys"]["match"]:
+                st.markdown("**🔑 Primary Keys Differ:**")
                 col1, col2 = st.columns(2)
                 with col1:
                     st.markdown("*Production:*")
-                    st.code(', '.join(meta['primary_keys']['production']) or 'None')
+                    prod_pks = meta["primary_keys"]["production"]
+                    if prod_pks:
+                        st.code(", ".join(prod_pks))
+                    else:
+                        st.code("(No primary keys)")
                 with col2:
                     st.markdown("*Test:*")
-                    st.code(', '.join(meta['primary_keys']['test']) or 'None')
+                    test_pks = meta["primary_keys"]["test"]
+                    if test_pks:
+                        st.code(", ".join(test_pks))
+                    else:
+                        st.code("(No primary keys)")
+
+                # Show what's different
+                prod_set = set(meta["primary_keys"]["production"])
+                test_set = set(meta["primary_keys"]["test"])
+                only_in_prod = prod_set - test_set
+                only_in_test = test_set - prod_set
+
+                if only_in_prod or only_in_test:
+                    st.markdown("**Differences:**")
+                    if only_in_prod:
+                        st.error(f"❌ Only in production: {', '.join(only_in_prod)}")
+                    if only_in_test:
+                        st.warning(f"⚠️ Only in test: {', '.join(only_in_test)}")
 
             # Columns
-            if not meta['columns']['match']:
+            if not meta["columns"]["match"]:
                 st.markdown("**Column Differences:**")
                 col1, col2 = st.columns(2)
                 with col1:
-                    if meta['columns']['production_only']:
+                    if meta["columns"]["production_only"]:
                         st.markdown("*Production Only:*")
-                        for col in meta['columns']['production_only']:
+                        for col in meta["columns"]["production_only"]:
                             st.text(f"🔵 {col}")
                 with col2:
-                    if meta['columns']['test_only']:
+                    if meta["columns"]["test_only"]:
                         st.markdown("*Test Only:*")
-                        for col in meta['columns']['test_only']:
+                        for col in meta["columns"]["test_only"]:
                             st.text(f"🟢 {col}")
 
             # Data Types
-            if not meta['data_types']['match']:
+            if not meta["data_types"]["match"]:
                 st.markdown("**Data Type Differences:**")
-                type_df = pd.DataFrame([
-                    {'Column': col, 'Production Type': prod_type, 'Test Type': test_type}
-                    for col, (prod_type, test_type) in meta['data_types']['differences'].items()
-                ])
-                st.dataframe(type_df, use_container_width=True)
+                type_diffs = meta["data_types"]["differences"]
+
+                # Handle both old format (tuple) and new format (dict)
+                type_rows = []
+                for col, type_info in type_diffs.items():
+                    if isinstance(type_info, dict):
+                        # New format: {"production": "STRING", "test": "INTEGER"}
+                        type_rows.append(
+                            {
+                                "Column": col,
+                                "Production Type": type_info.get("production", "UNKNOWN"),
+                                "Test Type": type_info.get("test", "UNKNOWN"),
+                            }
+                        )
+                    elif isinstance(type_info, tuple) and len(type_info) == 2:
+                        # Old format: ("STRING", "INTEGER")
+                        type_rows.append({"Column": col, "Production Type": type_info[0], "Test Type": type_info[1]})
+
+                if type_rows:
+                    type_df = pd.DataFrame(type_rows)
+                    st.dataframe(type_df, use_container_width=True)
+                else:
+                    st.info("No data type differences to display")
 
             # Row Count
-            if not meta['row_count']['match']:
+            if not meta["row_count"]["match"]:
                 st.markdown("**Row Count Difference:**")
                 col1, col2, col3 = st.columns(3)
                 with col1:
-                    st.metric("Production", meta['row_count']['production'])
+                    st.metric("Production", meta["row_count"]["production"])
                 with col2:
-                    st.metric("Test", meta['row_count']['test'])
+                    st.metric("Test", meta["row_count"]["test"])
                 with col3:
-                    diff = meta['row_count']['test'] - meta['row_count']['production']
+                    diff = meta["row_count"]["test"] - meta["row_count"]["production"]
                     st.metric("Difference", diff, delta=diff)
 
 
@@ -178,75 +208,142 @@ def display_row_differences(differences: Dict[str, Any]):
     """
     Display row-level differences for a single table.
 
+    Handles both SQL-based and pandas-based comparison results.
+
     Args:
         differences: Row differences dictionary for one table
     """
-    if differences.get('status') == 'skipped':
+    if differences.get("status") == "skipped":
         st.info(f"ℹ️ Row comparison skipped: {differences.get('reason')}")
         return
 
-    if differences.get('status') == 'error':
+    if differences.get("status") == "error":
         st.error(f"❌ Error comparing rows: {differences.get('error')}")
         return
 
-    if differences.get('status') == 'match':
+    show_advanced = st.session_state.get("show_advanced", False)
+
+    # Show comparison method used
+    comparison_method = differences.get("comparison_method", "pandas")
+    if comparison_method == "sql":
+        st.caption("🚀 Compared using efficient SQL queries")
+
+        # Display SQL queries in an expander
+        if differences.get("sql_queries") and show_advanced:
+            with st.expander("🔍 View SQL Queries Used", expanded=False):
+                sql_queries = differences["sql_queries"]
+
+                st.markdown("**Query 1: Rows in Production but not in Test**")
+                st.code(sql_queries.get("production_not_in_test", "N/A"), language="sql")
+
+                st.markdown("**Query 2: Rows in Test but not in Production**")
+                st.code(sql_queries.get("test_not_in_production", "N/A"), language="sql")
+
+                st.markdown("**Query 3: Production Row Count**")
+                st.code(sql_queries.get("production_count", "N/A"), language="sql")
+
+                st.markdown("**Query 4: Test Row Count**")
+                st.code(sql_queries.get("test_count", "N/A"), language="sql")
+    else:
+        st.caption("🐼 Compared using pandas DataFrames")
+
+    if differences.get("status") == "match":
         st.success("✅ All rows match perfectly!")
+        total_rows = differences.get("total_rows_compared", 0)
+        if total_rows > 0:
+            st.info(f"📊 Compared {total_rows:,} rows with perfect match")
         return
 
     # Display summary metrics
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Total Rows Compared", differences['total_rows_compared'])
+        st.metric("Total Rows Compared", f"{differences.get('total_rows_compared', 0):,}")
     with col2:
-        st.metric("Identical Rows", differences['identical_rows'])
+        st.metric("Identical Rows", f"{differences.get('identical_rows', 0):,}")
     with col3:
-        st.metric("Differing Rows", differences['differing_rows'])
+        st.metric("Differing Rows", f"{differences.get('differing_rows', 0):,}")
+    with col4:
+        match_rate = (differences.get("identical_rows", 0) / differences.get("total_rows_compared", 1)) * 100
+        st.metric("Match Rate", f"{match_rate:.1f}%")
+
+    # SQL-specific metrics
+    if comparison_method == "sql":
+        st.markdown("---")
+        st.markdown("### Row Count Analysis")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Production Rows", f"{differences.get('production_row_count', 0):,}")
+        with col2:
+            st.metric("Test Rows", f"{differences.get('test_row_count', 0):,}")
+        with col3:
+            row_diff = abs(differences.get("production_row_count", 0) - differences.get("test_row_count", 0))
+            st.metric("Row Count Difference", f"{row_diff:,}")
+
+        if differences.get("rows_only_in_production", 0) > 0 or differences.get("rows_only_in_test", 0) > 0:
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Rows Only in Production", f"{differences.get('rows_only_in_production', 0):,}")
+            with col2:
+                st.metric("Rows Only in Test", f"{differences.get('rows_only_in_test', 0):,}")
 
     st.markdown("---")
 
-    # Column differences chart
-    if differences['column_differences']:
+    # Column differences chart (pandas comparison only)
+    if differences.get("column_differences"):
         st.markdown("### Differences by Column")
 
-        df = pd.DataFrame([
-            {'Column': col, 'Differing Rows': count}
-            for col, count in differences['column_differences'].items()
-        ]).sort_values('Differing Rows', ascending=False)
+        df = pd.DataFrame(
+            [{"Column": col, "Differing Rows": count} for col, count in differences["column_differences"].items()]
+        ).sort_values("Differing Rows", ascending=False)
 
         fig = px.bar(
             df,
-            x='Column',
-            y='Differing Rows',
-            title='Number of Differing Rows per Column',
-            color='Differing Rows',
-            color_continuous_scale='Reds'
+            x="Column",
+            y="Differing Rows",
+            title="Number of Differing Rows per Column",
+            color="Differing Rows",
+            color_continuous_scale="Reds",
         )
         fig.update_layout(showlegend=False)
         st.plotly_chart(fig, use_container_width=True)
 
     # Sample differences table
-    if differences['sample_differences']:
+    if differences.get("sample_differences"):
         st.markdown("### Sample Differences")
         st.caption(f"Showing first {len(differences['sample_differences'])} differences")
 
         # Convert to DataFrame for display
-        sample_df = pd.DataFrame(differences['sample_differences'])
+        sample_data = []
+        for diff in differences["sample_differences"]:
+            if comparison_method == "sql":
+                # SQL format: {primary_key: {}, source: 'production_only'/'test_only', values: {}}
+                pk_str = ", ".join([f"{k}={v}" for k, v in diff.get("primary_key", {}).items()])
+                sample_data.append(
+                    {
+                        "Primary Key": pk_str,
+                        "Source": diff.get("source", "unknown"),
+                        "Values": str(diff.get("values", {})),
+                    }
+                )
+            else:
+                # Pandas format: {primary_key: {}, column: '', production_value: '', test_value: ''}
+                pk_str = ", ".join([f"{k}={v}" for k, v in diff.get("primary_key", {}).items()])
+                sample_data.append(
+                    {
+                        "Primary Key": pk_str,
+                        "Column": diff.get("column", ""),
+                        "Production Value": diff.get("production_value", ""),
+                        "Test Value": diff.get("test_value", ""),
+                    }
+                )
 
-        # Format primary key as string
-        if 'primary_key' in sample_df.columns:
-            sample_df['primary_key'] = sample_df['primary_key'].apply(
-                lambda pk: ', '.join([f"{k}={v}" for k, v in pk.items()])
-            )
-
+        sample_df = pd.DataFrame(sample_data)
         st.dataframe(sample_df, use_container_width=True)
 
         # Export option
         csv = sample_df.to_csv(index=False)
         st.download_button(
-            label="📥 Download Differences as CSV",
-            data=csv,
-            file_name="row_differences.csv",
-            mime="text/csv"
+            label="📥 Download Differences as CSV", data=csv, file_name="row_differences.csv", mime="text/csv"
         )
     else:
         st.info("No sample differences available")
@@ -263,27 +360,16 @@ def display_summary_metrics(summary: Dict[str, Any]):
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        if summary['tables_with_metadata_differences'] > 0:
-            st.metric(
-                "Tables with Metadata Differences",
-                summary['tables_with_metadata_differences'],
-                delta=None
-            )
+        if summary["tables_with_metadata_differences"] > 0:
+            st.metric("Tables with Metadata Differences", summary["tables_with_metadata_differences"], delta=None)
 
     with col2:
-        if summary['tables_with_row_differences'] > 0:
-            st.metric(
-                "Tables with Row Differences",
-                summary['tables_with_row_differences'],
-                delta=None
-            )
+        if summary["tables_with_row_differences"] > 0:
+            st.metric("Tables with Row Differences", summary["tables_with_row_differences"], delta=None)
 
     with col3:
-        match_rate = (summary['matching_tables'] / summary['total_tables'] * 100) if summary['total_tables'] > 0 else 0
-        st.metric(
-            "Table Match Rate",
-            f"{match_rate:.1f}%"
-        )
+        match_rate = (summary["matching_tables"] / summary["total_tables"] * 100) if summary["total_tables"] > 0 else 0
+        st.metric("Table Match Rate", f"{match_rate:.1f}%")
 
 
 def display_comparison_progress(production_status: str, test_status: str):
@@ -295,12 +381,12 @@ def display_comparison_progress(production_status: str, test_status: str):
         test_status: Test job status
     """
     status_icons = {
-        'waiting': '⏳',
-        'processing': '⚙️',
-        'success': '✅',
-        'error': '❌',
-        'cancelled': '🚫',
-        'terminated': '🛑'
+        "waiting": "⏳",
+        "processing": "⚙️",
+        "success": "✅",
+        "error": "❌",
+        "cancelled": "🚫",
+        "terminated": "🛑",
     }
 
     col1, col2 = st.columns(2)
