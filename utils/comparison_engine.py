@@ -42,30 +42,50 @@ class ComparisonEngine:
         Returns:
             Comprehensive comparison results dictionary
         """
+        st.markdown("## 🔍 Starting Multi-Level Comparison")
+        st.info(f"""
+        **Comparing:**
+        - 🔵 Production Branch ID: `{production_branch}`
+        - 🟢 Test Branch ID: `{test_branch_id}`
+        """)
+
         results = {}
 
         # Level 1: Bucket comparison
+        st.markdown("---")
+        st.markdown("## Step 1: Bucket Comparison")
         results['bucket_comparison'] = self._compare_buckets(
             production_branch, test_branch_id
         )
 
         # Level 2: Table comparison
+        st.markdown("---")
+        st.markdown("## Step 2: Table Comparison")
         results['table_comparison'] = self._compare_tables(
             production_branch, test_branch_id, results['bucket_comparison']
         )
 
         # Level 3: Metadata comparison
+        st.markdown("---")
+        st.markdown("## Step 3: Metadata Comparison")
         results['metadata_comparison'] = self._compare_metadata(
             production_branch, test_branch_id, results['table_comparison']
         )
 
         # Level 4: Row-level comparison
+        st.markdown("---")
+        st.markdown("## Step 4: Row-Level Data Comparison")
         results['row_differences'] = self._compare_row_data(
             production_branch, test_branch_id, results['metadata_comparison']
         )
 
         # Generate summary
+        st.markdown("---")
+        st.markdown("## 📊 Generating Summary")
         results['summary'] = self._generate_summary(results)
+
+        st.markdown("---")
+        st.success("✅ Comparison complete!")
 
         return results
 
@@ -84,14 +104,70 @@ class ComparisonEngine:
         Returns:
             Bucket comparison results
         """
-        prod_buckets = set(self.client.list_buckets(prod_branch))
-        test_buckets = set(self.client.list_buckets(test_branch))
+        st.markdown("### 🪣 Bucket Comparison")
+
+        # Get buckets with debug info
+        try:
+            prod_buckets = set(self.client.list_buckets(prod_branch))
+            st.success(f"✅ **Production Branch (ID: {prod_branch})**: Found {len(prod_buckets)} bucket(s)")
+            if prod_buckets:
+                with st.expander(f"View {len(prod_buckets)} production bucket(s)", expanded=len(prod_buckets) <= 5):
+                    for bucket in sorted(prod_buckets):
+                        st.text(f"  • {bucket}")
+        except Exception as e:
+            st.error(f"❌ Error listing production buckets: {str(e)}")
+            st.exception(e)
+            prod_buckets = set()
+
+        try:
+            test_buckets = set(self.client.list_buckets(test_branch))
+            st.success(f"✅ **Test Branch (ID: {test_branch})**: Found {len(test_buckets)} bucket(s)")
+            if test_buckets:
+                with st.expander(f"View {len(test_buckets)} test bucket(s)", expanded=len(test_buckets) <= 5):
+                    for bucket in sorted(test_buckets):
+                        st.text(f"  • {bucket}")
+        except Exception as e:
+            st.error(f"❌ Error listing test buckets: {str(e)}")
+            st.exception(e)
+            test_buckets = set()
+
+        # Show comparison results
+        common = sorted(prod_buckets & test_buckets)
+        prod_only = sorted(prod_buckets - test_buckets)
+        test_only = sorted(test_buckets - prod_buckets)
+
+        st.markdown("---")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Common Buckets", len(common))
+            if common:
+                with st.expander(f"View {len(common)} common bucket(s)"):
+                    for bucket in common:
+                        st.text(f"  ✅ {bucket}")
+        with col2:
+            st.metric("Production Only", len(prod_only))
+            if prod_only:
+                with st.expander(f"View {len(prod_only)} production-only bucket(s)"):
+                    for bucket in prod_only:
+                        st.text(f"  🔵 {bucket}")
+        with col3:
+            st.metric("Test Only", len(test_only))
+            if test_only:
+                with st.expander(f"View {len(test_only)} test-only bucket(s)"):
+                    for bucket in test_only:
+                        st.text(f"  🟢 {bucket}")
 
         return {
-            'production_only': sorted(prod_buckets - test_buckets),
-            'test_only': sorted(test_buckets - prod_buckets),
-            'common': sorted(prod_buckets & test_buckets),
-            'status': 'match' if prod_buckets == test_buckets else 'differ'
+            'production_only': prod_only,
+            'test_only': test_only,
+            'common': common,
+            'status': 'match' if prod_buckets == test_buckets else 'differ',
+            '_debug': {
+                'production_buckets': sorted(prod_buckets),
+                'test_buckets': sorted(test_buckets),
+                'production_branch_id': prod_branch,
+                'test_branch_id': test_branch
+            }
         }
 
     def _compare_tables(
@@ -111,16 +187,48 @@ class ComparisonEngine:
         Returns:
             Table comparison results per bucket
         """
+        st.markdown("### 📊 Table Comparison")
+
+        if not bucket_comparison['common']:
+            st.warning("⚠️ No common buckets to compare tables")
+            return {}
+
         results = {}
 
         for bucket in bucket_comparison['common']:
+            st.markdown(f"#### Bucket: `{bucket}`")
+
             prod_tables = set(self.client.list_tables_in_bucket(bucket, prod_branch))
             test_tables = set(self.client.list_tables_in_bucket(bucket, test_branch))
 
+            common = sorted(prod_tables & test_tables)
+            prod_only = sorted(prod_tables - test_tables)
+            test_only = sorted(test_tables - prod_tables)
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Common Tables", len(common))
+                if common:
+                    with st.expander(f"View {len(common)} common table(s)"):
+                        for table in common:
+                            st.text(f"  ✅ {table}")
+            with col2:
+                st.metric("Production Only", len(prod_only))
+                if prod_only:
+                    with st.expander(f"View {len(prod_only)} production-only table(s)"):
+                        for table in prod_only:
+                            st.text(f"  🔵 {table}")
+            with col3:
+                st.metric("Test Only", len(test_only))
+                if test_only:
+                    with st.expander(f"View {len(test_only)} test-only table(s)"):
+                        for table in test_only:
+                            st.text(f"  🟢 {table}")
+
             results[bucket] = {
-                'production_only': sorted(prod_tables - test_tables),
-                'test_only': sorted(test_tables - prod_tables),
-                'common': sorted(prod_tables & test_tables),
+                'production_only': prod_only,
+                'test_only': test_only,
+                'common': common,
                 'status': 'match' if prod_tables == test_tables else 'differ'
             }
 
@@ -143,7 +251,15 @@ class ComparisonEngine:
         Returns:
             Metadata comparison results per table
         """
+        st.markdown("### 📋 Metadata Comparison")
+
+        if not table_comparison:
+            st.warning("⚠️ No common tables to compare metadata")
+            return {}
+
         results = {}
+        total_common_tables = sum(len(comp['common']) for comp in table_comparison.values())
+        st.info(f"Comparing metadata for {total_common_tables} common table(s)...")
 
         for bucket, comparison in table_comparison.items():
             for table in comparison['common']:
@@ -152,6 +268,17 @@ class ComparisonEngine:
                 try:
                     prod_meta = self.client.get_table_detail(table_id, prod_branch)
                     test_meta = self.client.get_table_detail(table_id, test_branch)
+
+                    # Debug: Check what we got back
+                    if not isinstance(prod_meta, dict):
+                        st.error(f"❌ Production metadata for {table_id} is not a dict: {type(prod_meta)}")
+                        st.write("Production metadata:", prod_meta)
+                        raise ValueError(f"Expected dict, got {type(prod_meta)}: {prod_meta}")
+
+                    if not isinstance(test_meta, dict):
+                        st.error(f"❌ Test metadata for {table_id} is not a dict: {type(test_meta)}")
+                        st.write("Test metadata:", test_meta)
+                        raise ValueError(f"Expected dict, got {type(test_meta)}: {test_meta}")
 
                     pk_comparison = self._compare_primary_keys(prod_meta, test_meta)
                     col_comparison = self._compare_columns(prod_meta, test_meta)
@@ -173,7 +300,15 @@ class ComparisonEngine:
                         'row_count': count_comparison,
                         'status': 'match' if all_match else 'differ'
                     }
+
+                    # Show success for this table
+                    if all_match:
+                        st.success(f"✅ Table `{table_id}`: All metadata matches")
+                    else:
+                        st.warning(f"⚠️ Table `{table_id}`: Metadata differences found")
+
                 except Exception as e:
+                    st.error(f"❌ Error comparing metadata for table `{table_id}`: {str(e)}")
                     results[table_id] = {
                         'status': 'error',
                         'error': str(e)
