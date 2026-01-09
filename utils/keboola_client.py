@@ -621,7 +621,15 @@ class KeboolaAPIClient:
         response = requests.get(url, headers=_self.headers)
         response.raise_for_status()
 
-        result = response.json()
+        try:
+            result = response.json()
+        except ValueError as e:
+            import streamlit as st
+            
+            error_msg = f"❌ API returned invalid JSON for table {full_table_id}. Status: {response.status_code}, Content: {response.text[:200]}..."
+            st.error(error_msg)
+            # Re-raise with a clear message
+            raise ValueError(error_msg) from e
 
         # Debug: Verify we got a dict
         if not isinstance(result, dict):
