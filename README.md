@@ -72,6 +72,12 @@ This tool automates the validation of component upgrades by:
 
    The app will open in your browser at `http://localhost:8501`
 
+### Local Tests
+
+Get token to the project https://connection.us-east4.gcp.keboola.com/admin/projects/4214 where test tables are 
+
+Run KBC_TOKEN=__token__ pytest tests/test_functional_scenarios.py
+
 ### Deployment to Keboola
 
 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for detailed deployment instructions.
