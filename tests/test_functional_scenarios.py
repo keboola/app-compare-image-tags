@@ -83,13 +83,13 @@ def test_scenario_2_dtype_mismatch_b_vs_c(comparison_engine):
     # Verify dtype mismatch
     assert meta["data_types"]["match"] is False, "Data types should differ"
     assert len(meta["data_types"]["differences"]) > 0, "Should have at least one data type difference"
-    
+
     print(f"  - Data type differences found: {meta['data_types']['differences']}")
-    
+
     # Primary keys and columns should match
     assert meta["primary_keys"]["match"] is True, "Primary keys should match"
     assert meta["columns"]["match"] is True, "Columns should match"
-    
+
     # Row comparison should be skipped due to schema mismatch
     assert row_diff["status"] == "skipped", "Row comparison should be skipped"
     assert "Metadata mismatch" in row_diff["reason"]
@@ -169,7 +169,7 @@ def test_scenario_4_row_mismatch_relaxed_gating(comparison_engine):
     else:
         # If only row count differs, relaxed gating should allow row comparison
         assert row_diff["status"] != "skipped", "Row comparison was skipped but should have proceeded!"
-        
+
         # Should find differences
         if row_diff["status"] != "differ":
             print(f"  - UNEXPECTED STATUS: {row_diff['status']}")

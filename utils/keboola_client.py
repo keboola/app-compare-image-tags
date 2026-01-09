@@ -625,7 +625,7 @@ class KeboolaAPIClient:
             result = response.json()
         except ValueError as e:
             import streamlit as st
-            
+
             error_msg = f"❌ API returned invalid JSON for table {full_table_id}. Status: {response.status_code}, Content: {response.text[:200]}..."
             st.error(error_msg)
             # Re-raise with a clear message
