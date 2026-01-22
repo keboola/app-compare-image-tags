@@ -36,6 +36,19 @@ def create_results_page():
             # Clear current results and trigger rerun
             st.session_state.comparison_results = None
             st.session_state.comparison_triggered = False
+
+            # For config mode, also clear job IDs to retrigger jobs
+            if st.session_state.get("comparison_mode") == "config":
+                st.session_state.pop("production_job_id", None)
+                st.session_state.pop("test_job_id", None)
+                st.session_state.pop("production_job_status", None)
+                st.session_state.pop("test_job_status", None)
+                st.session_state.pop("jobs_completion_logged", None)
+                # Clear comparison logs
+                st.session_state.pop("comparison_logs", None)
+                st.session_state.pop("job_execution_logs", None)
+                st.session_state.pop("job_monitoring_logs", None)
+
             st.rerun()
 
     # Display comparison execution log if available
