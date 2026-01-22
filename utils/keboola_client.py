@@ -720,6 +720,34 @@ class KeboolaAPIClient:
 
             time.sleep(poll_interval)
 
+    def get_job_events(self, job_id: str, limit: int = 1000) -> List[Dict[str, Any]]:
+        """
+        Get events/logs for a specific job.
+
+        Args:
+            job_id: Job ID
+            limit: Maximum number of events to retrieve (default 1000)
+
+        Returns:
+            List of event dictionaries containing log messages
+        """
+        # First get the job to extract the runId
+        job_status = self.get_job_status(job_id)
+        run_id = job_status.get("runId")
+
+        if not run_id:
+            raise ValueError(f"Job {job_id} does not have a runId")
+
+        # Query events using runId
+        url = f"{self.storage_url}/v2/storage/events"
+        params = {"runId": run_id, "limit": limit}
+
+        response = requests.get(url, headers=self.headers, params=params)
+        response.raise_for_status()
+
+        events = response.json()
+        return events
+
     # ==================== Data Queries ====================
 
     @st.cache_data(ttl=300)

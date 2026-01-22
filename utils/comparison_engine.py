@@ -75,6 +75,14 @@ class ComparisonEngine:
             production_branch, test_branch_id, results["metadata_comparison"]
         )
 
+        # Level 5: Job logs comparison (only for config mode)
+        if st.session_state.get("comparison_mode") == "config":
+            st.markdown("---")
+            st.markdown("## Step 5: Job Logs Comparison")
+            results["log_comparison"] = self._compare_job_logs()
+        else:
+            results["log_comparison"] = None
+
         # Generate summary
         st.markdown("---")
         st.markdown("## 📊 Generating Summary")
@@ -844,6 +852,116 @@ class ComparisonEngine:
             print("\n--- PANDAS FALLBACK ERROR ---")
             traceback.print_exc()
             return {"status": "error", "error": str(e), "message": "Failed to compare DataFrames"}
+
+    def _compare_job_logs(self) -> Optional[Dict[str, Any]]:
+        """
+        Compare job logs/events between production and test runs.
+
+        Returns:
+            Log comparison results dictionary or None if not applicable
+        """
+        st.markdown("### 📝 Job Logs Comparison")
+
+        # Get job IDs from session state
+        prod_job_id = st.session_state.get("production_job_id")
+        test_job_id = st.session_state.get("test_job_id")
+
+        if not prod_job_id or not test_job_id:
+            st.info("ℹ️ Job IDs not available - skipping log comparison")
+            return None
+
+        try:
+            # Fetch job events/logs
+            st.info(f"Fetching logs for production job: {prod_job_id}")
+            prod_events = self.client.get_job_events(prod_job_id)
+
+            st.info(f"Fetching logs for test job: {test_job_id}")
+            test_events = self.client.get_job_events(test_job_id)
+
+            # Show debug info about event types
+            prod_event_types = {}
+            for event in prod_events:
+                event_type = event.get("event", "unknown")
+                prod_event_types[event_type] = prod_event_types.get(event_type, 0) + 1
+
+            st.info(f"Production event types: {prod_event_types}")
+
+            test_event_types = {}
+            for event in test_events:
+                event_type = event.get("event", "unknown")
+                test_event_types[event_type] = test_event_types.get(event_type, 0) + 1
+
+            st.info(f"Test event types: {test_event_types}")
+
+            # Show sample events in advanced mode
+            if st.session_state.get("show_advanced", False):
+                with st.expander("🔧 Sample Production Event (first non-storage event)"):
+                    for event in prod_events[:20]:  # Check first 20
+                        if not event.get("event", "").startswith("storage."):
+                            st.json(event)
+                            break
+
+                with st.expander("🔧 Sample Test Event (first non-storage event)"):
+                    for event in test_events[:20]:
+                        if not event.get("event", "").startswith("storage."):
+                            st.json(event)
+                            break
+
+            # Filter to only component output logs (typically "info" events with component output)
+            # Skip system events like "storage.*", "job.*", etc.
+            def is_component_log(event):
+                event_type = event.get("event", "")
+                # Include only standard log events, exclude storage/system events
+                return not event_type.startswith(("storage.", "job."))
+
+            prod_log_events = [e for e in prod_events if is_component_log(e)]
+            test_log_events = [e for e in test_events if is_component_log(e)]
+
+            # Extract log messages from filtered events
+            prod_messages = [event.get("message", "") for event in prod_log_events if event.get("message")]
+            test_messages = [event.get("message", "") for event in test_log_events if event.get("message")]
+
+            st.success(
+                f"✅ Fetched {len(prod_messages)} production log messages and {len(test_messages)} test log messages (filtered from {len(prod_events)} and {len(test_events)} total events)"
+            )
+
+            # Compare log messages
+            prod_set = set(prod_messages)
+            test_set = set(test_messages)
+
+            common_messages = sorted(prod_set & test_set)
+            prod_only_messages = sorted(prod_set - test_set)
+            test_only_messages = sorted(test_set - prod_set)
+
+            # Build detailed comparison
+            result = {
+                "production_job_id": prod_job_id,
+                "test_job_id": test_job_id,
+                "production_message_count": len(prod_messages),
+                "test_message_count": len(test_messages),
+                "production_unique_message_count": len(prod_set),
+                "test_unique_message_count": len(test_set),
+                "common_messages": common_messages,
+                "production_only_messages": prod_only_messages,
+                "test_only_messages": test_only_messages,
+                "production_events": prod_events,  # Full event data
+                "test_events": test_events,  # Full event data
+                "status": "match" if prod_set == test_set else "differ",
+            }
+
+            if result["status"] == "match":
+                st.success("✅ Job logs match perfectly")
+            else:
+                st.warning(
+                    f"⚠️ Job logs differ: {len(prod_only_messages)} production-only, {len(test_only_messages)} test-only"
+                )
+
+            return result
+
+        except Exception as e:
+            st.error(f"❌ Failed to compare job logs: {str(e)}")
+            st.exception(e)
+            return {"status": "error", "error": str(e)}
 
     def _generate_summary(self, comparison_results: Dict[str, Any]) -> Dict[str, Any]:
         """

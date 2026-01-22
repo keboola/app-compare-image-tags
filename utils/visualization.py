@@ -398,3 +398,122 @@ def display_comparison_progress(production_status: str, test_status: str):
     with col2:
         st.markdown(f"### Test Run")
         st.markdown(f"{status_icons.get(test_status, '❓')} **{test_status.upper()}**")
+
+
+def display_log_comparison(log_comparison: Dict[str, Any]):
+    """
+    Display job log comparison results in git-diff style.
+
+    Args:
+        log_comparison: Log comparison dictionary containing production and test logs
+    """
+    if not log_comparison or log_comparison.get("status") == "error":
+        st.error(f"❌ Log comparison failed: {log_comparison.get('error', 'Unknown error')}")
+        return
+
+    # Show overview metrics
+    st.markdown(f"**Status:** {display_status_indicator(log_comparison['status'])} {log_comparison['status'].upper()}")
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.metric("Production Messages", log_comparison.get("production_message_count", 0))
+        st.caption(f"{log_comparison.get('production_unique_message_count', 0)} unique")
+
+    with col2:
+        st.metric("Test Messages", log_comparison.get("test_message_count", 0))
+        st.caption(f"{log_comparison.get('test_unique_message_count', 0)} unique")
+
+    with col3:
+        st.metric("Common Messages", len(log_comparison.get("common_messages", [])))
+
+    st.markdown("---")
+
+    # Display differences in git-diff style
+    prod_only = log_comparison.get("production_only_messages", [])
+    test_only = log_comparison.get("test_only_messages", [])
+
+    if not prod_only and not test_only:
+        st.success("✅ All log messages are identical!")
+        return
+
+    # Create tabs for different views
+    tab1, tab2, tab3, tab4 = st.tabs(["Diff View", "Production Only", "Test Only", "All Logs (Side by Side)"])
+
+    with tab1:
+        st.markdown("### 📝 Log Differences (Git-Style)")
+
+        if prod_only:
+            st.markdown("#### ➖ Removed from Production (not in Test)")
+            for msg in prod_only:
+                # Display in red with minus prefix (git-style)
+                st.markdown(f'<div style="background-color: #ffebe9; padding: 5px; border-left: 3px solid #d73a49; margin-bottom: 2px;"><code style="color: #d73a49;">- {msg}</code></div>', unsafe_allow_html=True)
+
+        if test_only:
+            st.markdown("#### ➕ Added in Test (not in Production)")
+            for msg in test_only:
+                # Display in green with plus prefix (git-style)
+                st.markdown(f'<div style="background-color: #d4edda; padding: 5px; border-left: 3px solid #28a745; margin-bottom: 2px;"><code style="color: #28a745;">+ {msg}</code></div>', unsafe_allow_html=True)
+
+    with tab2:
+        st.markdown("### Production-Only Messages")
+        if prod_only:
+            st.info(f"Found {len(prod_only)} message(s) only in production logs")
+            for i, msg in enumerate(prod_only, 1):
+                st.text(f"{i:4d} | {msg}")
+        else:
+            st.success("No production-only messages")
+
+    with tab3:
+        st.markdown("### Test-Only Messages")
+        if test_only:
+            st.info(f"Found {len(test_only)} message(s) only in test logs")
+            for i, msg in enumerate(test_only, 1):
+                st.text(f"{i:4d} | {msg}")
+        else:
+            st.success("No test-only messages")
+
+    with tab4:
+        st.markdown("### All Logs (Side by Side)")
+
+        # Get all production and test messages from the log_comparison data
+        prod_all_messages = []
+        test_all_messages = []
+
+        # Reconstruct all messages from the event data
+        if log_comparison.get("production_events"):
+            for event in log_comparison["production_events"]:
+                if event.get("message"):
+                    prod_all_messages.append(event.get("message"))
+
+        if log_comparison.get("test_events"):
+            for event in log_comparison["test_events"]:
+                if event.get("message"):
+                    test_all_messages.append(event.get("message"))
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("**Production Logs** ({} messages)".format(len(prod_all_messages)))
+            for i, msg in enumerate(prod_all_messages, 1):
+                st.text(f"{i:4d} | {msg}")
+
+        with col2:
+            st.markdown("**Test Logs** ({} messages)".format(len(test_all_messages)))
+            for i, msg in enumerate(test_all_messages, 1):
+                st.text(f"{i:4d} | {msg}")
+
+    # Show detailed event data in advanced mode
+    if st.session_state.get("show_advanced", False):
+        st.markdown("---")
+        st.markdown("### 🔧 Full Event Data")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            with st.expander("Production Events (JSON)"):
+                st.json(log_comparison.get("production_events", []))
+
+        with col2:
+            with st.expander("Test Events (JSON)"):
+                st.json(log_comparison.get("test_events", []))

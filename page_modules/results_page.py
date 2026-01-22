@@ -14,6 +14,7 @@ from utils.visualization import (
     display_table_comparison,
     display_metadata_differences,
     display_row_differences,
+    display_log_comparison,
 )
 
 
@@ -127,8 +128,13 @@ def create_results_page():
 
     st.markdown("---")
 
-    # Tab navigation
-    tab1, tab2, tab3 = st.tabs(["📋 Summary", "🗂️ Structure & Metadata", "🔍 Row Differences"])
+    # Tab navigation - conditionally add Log Comparison tab for config mode
+    log_comparison_available = results.get("log_comparison") is not None
+
+    if log_comparison_available:
+        tab1, tab2, tab3, tab4 = st.tabs(["📋 Summary", "🗂️ Structure & Metadata", "🔍 Row Differences", "📝 Log Comparison"])
+    else:
+        tab1, tab2, tab3 = st.tabs(["📋 Summary", "🗂️ Structure & Metadata", "🔍 Row Differences"])
 
     with tab1:
         display_summary_tab(results)
@@ -138,6 +144,10 @@ def create_results_page():
 
     with tab3:
         display_differences_tab(results)
+
+    if log_comparison_available:
+        with tab4:
+            display_log_comparison_tab(results)
 
 
 def display_summary_tab(results: dict):
@@ -274,3 +284,34 @@ def display_differences_tab(results: dict):
 
         summary_df = pd.DataFrame(summary_data)
         st.dataframe(summary_df, use_container_width=True)
+
+
+def display_log_comparison_tab(results: dict):
+    """
+    Display job log comparison tab.
+
+    Args:
+        results: Full comparison results dictionary
+    """
+    log_comparison = results.get("log_comparison")
+
+    if not log_comparison:
+        st.info("ℹ️ Log comparison not available for this comparison mode")
+        return
+
+    # Show job IDs
+    st.markdown("### Job Information")
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("**Production Job**")
+        st.code(log_comparison.get("production_job_id", "N/A"))
+
+    with col2:
+        st.markdown("**Test Job**")
+        st.code(log_comparison.get("test_job_id", "N/A"))
+
+    st.markdown("---")
+
+    # Display log comparison
+    display_log_comparison(log_comparison)
