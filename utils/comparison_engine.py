@@ -681,8 +681,9 @@ class ComparisonEngine:
         prod_count_df = self.client.execute_query(query_prod_count)
         test_count_df = self.client.execute_query(query_test_count)
 
-        prod_count = prod_count_df.iloc[0]["count"] if not prod_count_df.empty else 0
-        test_count = test_count_df.iloc[0]["count"] if not test_count_df.empty else 0
+        # Use positional access to avoid column name case sensitivity issues
+        prod_count = prod_count_df.iloc[0, 0] if not prod_count_df.empty else 0
+        test_count = test_count_df.iloc[0, 0] if not test_count_df.empty else 0
 
         # Calculate differences
         prod_only_count = len(prod_only_df)
@@ -1435,8 +1436,9 @@ class ComparisonEngine:
                 c1_df = self.client.execute_query(f"SELECT COUNT(*) as c FROM {t1_qualified}")
                 c2_df = self.client.execute_query(f"SELECT COUNT(*) as c FROM {t2_qualified}")
 
-                c1 = c1_df.iloc[0]["c"] if not c1_df.empty else 0
-                c2 = c2_df.iloc[0]["c"] if not c2_df.empty else 0
+                # Use positional access to avoid column name case sensitivity issues
+                c1 = c1_df.iloc[0, 0] if not c1_df.empty else 0
+                c2 = c2_df.iloc[0, 0] if not c2_df.empty else 0
 
                 total_diffs = len(df_1_not_2) + len(df_2_not_1)
 
