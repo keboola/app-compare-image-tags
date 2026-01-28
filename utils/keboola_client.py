@@ -865,8 +865,7 @@ class KeboolaAPIClient:
         # Step 1: Submit query job
         # POST /api/v1/branches/{branchId}/workspaces/{workspaceId}/queries
         submit_url = (
-            f"{_self.query_service_url}/api/v1/branches/{numeric_branch_id}"
-            f"/workspaces/{_self.workspace_id}/queries"
+            f"{_self.query_service_url}/api/v1/branches/{numeric_branch_id}/workspaces/{_self.workspace_id}/queries"
         )
 
         payload = {"statements": [query]}

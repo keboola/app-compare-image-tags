@@ -596,7 +596,10 @@ def execution_phase(client: KeboolaAPIClient):
                 add_log("job_execution", f"Production job triggered (ID: {prod_job['id']})", "success")
 
                 # Trigger test run (test branch with test tag)
-                add_log("job_execution", f"Triggering test job in branch {st.session_state['test_branch_id']} (mode: {job_mode})...")
+                add_log(
+                    "job_execution",
+                    f"Triggering test job in branch {st.session_state['test_branch_id']} (mode: {job_mode})...",
+                )
                 test_job = client.run_component(
                     st.session_state["component_id"],
                     st.session_state["config_id"],
