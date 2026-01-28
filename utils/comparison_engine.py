@@ -664,13 +664,24 @@ class ComparisonEngine:
         test_only_count = len(test_only_df)
         total_differences = prod_only_count + test_only_count
 
+        # Calculate identical_rows with honest reporting
+        # EXCEPT can't distinguish modified vs added/removed without PK analysis
+        if primary_keys:
+            # With PKs, we can estimate (future enhancement could do more accurate analysis)
+            identical_rows = min(prod_count, test_count) - max(prod_only_count, test_only_count)
+            identical_rows_note = "Estimated based on row counts"
+        else:
+            identical_rows = None
+            identical_rows_note = "Cannot calculate without primary keys"
+
         # Build result
         result = {
             "total_rows_compared": max(prod_count, test_count),
             "production_row_count": prod_count,
             "test_row_count": test_count,
             "differing_rows": total_differences,
-            "identical_rows": min(prod_count, test_count) - (total_differences // 2 if prod_count == test_count else 0),
+            "identical_rows": identical_rows,
+            "identical_rows_note": identical_rows_note,
             "rows_only_in_production": prod_only_count,
             "rows_only_in_test": test_only_count,
             "sample_differences": [],
@@ -1412,12 +1423,22 @@ class ComparisonEngine:
 
                 total_diffs = len(df_1_not_2) + len(df_2_not_1)
 
+                # Calculate identical_rows with honest reporting
+                pks = meta["primary_keys"]["production"]
+                if pks:
+                    identical_rows = min(c1, c2) - max(len(df_1_not_2), len(df_2_not_1))
+                    identical_rows_note = "Estimated based on row counts"
+                else:
+                    identical_rows = None
+                    identical_rows_note = "Cannot calculate without primary keys"
+
                 res = {
                     "total_rows_compared": max(c1, c2),
                     "production_row_count": c1,  # Table 1
                     "test_row_count": c2,  # Table 2
                     "differing_rows": total_diffs,
-                    "identical_rows": min(c1, c2) - (total_diffs // 2 if c1 == c2 else 0),
+                    "identical_rows": identical_rows,
+                    "identical_rows_note": identical_rows_note,
                     "status": "match" if total_diffs == 0 and c1 == c2 else "differ",
                     "sample_differences": [],
                 }
