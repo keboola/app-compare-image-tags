@@ -900,7 +900,7 @@ class ComparisonEngine:
                                         "test_value": str(test_val) if pd.notna(test_val) else None,
                                     }
                                 )
-                        except:
+                        except (KeyError, IndexError, TypeError):
                             continue
 
             diff_summary["status"] = "match" if total_differences == 0 else "differ"

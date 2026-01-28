@@ -123,7 +123,7 @@ class KeboolaAPIClient:
                     config = config_response.json()
                     config["component"] = component_id
                     return config
-            except:
+            except requests.RequestException:
                 continue
 
         raise ValueError(f"Configuration {config_id} not found in any component")
@@ -162,7 +162,7 @@ class KeboolaAPIClient:
                 )
             except ValueError:
                 raise
-            except:
+            except (json.JSONDecodeError, KeyError, TypeError):
                 raise ValueError(f"Configuration creation failed with status {response.status_code}: {response.text}")
 
         return response.json()
@@ -405,7 +405,7 @@ class KeboolaAPIClient:
                 raise ValueError(
                     f"Branch creation failed: {error_detail.get('error', error_detail.get('message', response.text))}"
                 )
-            except:
+            except (json.JSONDecodeError, KeyError, TypeError):
                 raise ValueError(f"Branch creation failed with status {response.status_code}: {response.text}")
 
         # The response is a JOB, not the branch!
@@ -432,7 +432,7 @@ class KeboolaAPIClient:
                         st.write(f"Found {len(branches)} total branches")
                         branch_names = [b.get("name") for b in branches]
                         st.write(f"Branch names: {branch_names}")
-                except:
+                except Exception:
                     pass  # Ignore if we can't show debug info
 
             # Look for the branch by name
@@ -677,7 +677,7 @@ class KeboolaAPIClient:
                 )
             except ValueError:
                 raise
-            except:
+            except (json.JSONDecodeError, KeyError, TypeError):
                 raise ValueError(f"Job creation failed with status {response.status_code}: {response.text}")
 
         return response.json()
