@@ -488,7 +488,7 @@ class ComparisonEngine:
         prod_branch: Optional[str],
         test_branch: Optional[str],
         metadata_comparison: Dict[str, Any],
-        row_limit: int = 10000,
+        row_limit: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Compare actual row data for tables with matching metadata.
@@ -499,11 +499,15 @@ class ComparisonEngine:
             prod_branch: Production branch ID
             test_branch: Test branch ID
             metadata_comparison: Metadata comparison results
-            row_limit: Maximum rows to compare per table
+            row_limit: Maximum rows to compare per table (reads from session state if None)
 
         Returns:
             Row-level difference results per table
         """
+        # Read row_limit from session state if not provided
+        if row_limit is None:
+            row_limit = st.session_state.get("comparison_row_limit", 1000)
+
         results = {}
 
         for table_id, meta in metadata_comparison.items():
@@ -580,7 +584,7 @@ class ComparisonEngine:
         test_branch: Optional[str],
         primary_keys: List[str],
         columns: List[str],
-        row_limit: int = 10000,
+        row_limit: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Compare tables using SQL EXCEPT queries for maximum efficiency.
@@ -593,7 +597,7 @@ class ComparisonEngine:
             test_branch: Test branch ID
             primary_keys: List of primary key columns
             columns: List of common columns to compare
-            row_limit: Maximum rows to compare
+            row_limit: Maximum rows to compare (reads from session state if None)
 
         Returns:
             Comparison results dictionary
@@ -602,7 +606,9 @@ class ComparisonEngine:
         if not _validate_table_id(table_id):
             raise ValueError(f"Invalid table ID format: {table_id}")
 
-        # Validate and sanitize row_limit
+        # Read row_limit from session state if not provided, then validate
+        if row_limit is None:
+            row_limit = st.session_state.get("comparison_row_limit", 1000)
         row_limit = max(1, min(int(row_limit), 100000))
 
         # Get qualified table names

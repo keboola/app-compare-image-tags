@@ -38,6 +38,18 @@ def create_input_page():
 
     selected_mode_label = st.radio("Select Comparison Mode", modes, index=default_index, horizontal=True)
 
+    # Advanced Settings (shared across all modes)
+    with st.expander("⚙️ Advanced Settings", expanded=False):
+        st.number_input(
+            "Row Comparison Limit",
+            min_value=100,
+            max_value=100000,
+            value=st.session_state.get("comparison_row_limit", 1000),
+            step=100,
+            help="Maximum rows to compare per table. Lower values are faster but may miss differences.",
+            key="comparison_row_limit",
+        )
+
     st.markdown("---")
 
     if selected_mode_label == modes[0]:
@@ -52,6 +64,9 @@ def display_validated_input():
     """Display validated input summary and allow changing input."""
     mode = st.session_state.get("comparison_mode")
 
+    # Display row limit for all modes
+    row_limit = st.session_state.get("comparison_row_limit", 1000)
+
     if mode == "config":
         st.success("✅ Configuration Comparison Mode")
         st.info(f"**Configuration:** {st.session_state['original_config']['name']}")
@@ -59,6 +74,7 @@ def display_validated_input():
         st.info(f"**Production Tag:** {st.session_state['production_image_tag']}")
         st.info(f"**Test Tag:** {st.session_state['test_image_tag']}")
         st.info(f"**Job Mode:** {st.session_state.get('job_mode', 'run')}")
+        st.info(f"**Row Limit:** {row_limit:,}")
 
     elif mode == "tables":
         st.success("✅ Table Comparison Mode")
@@ -66,12 +82,14 @@ def display_validated_input():
         table_ids = st.session_state["table_ids_to_compare"]
         st.info(f"**Table 1:** {table_ids[0]}")
         st.info(f"**Table 2:** {table_ids[1]}")
+        st.info(f"**Row Limit:** {row_limit:,}")
 
     elif mode == "buckets":
         st.success("✅ Bucket Comparison Mode")
         st.info(f"**Production Branch:** {st.session_state['production_branch_name']}")
         st.info(f"**Test Branch:** {st.session_state['test_branch_name']}")
         st.info(f"**Buckets to Compare:** {len(st.session_state['bucket_ids_to_compare'])}")
+        st.info(f"**Row Limit:** {row_limit:,}")
         with st.expander("View bucket list"):
             for bucket_id in st.session_state["bucket_ids_to_compare"]:
                 st.text(f"  • {bucket_id}")
