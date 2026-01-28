@@ -35,6 +35,8 @@ def main():
     elif st.session_state.get("last_phase") != current_phase:
         # Only auto-navigate when phase actually changes (e.g., comparison completes)
         st.session_state.current_nav_page = phase_to_index[current_phase]
+        # Also update the radio widget's stored value so Streamlit uses the new index
+        st.session_state.nav_radio = page_options[phase_to_index[current_phase]]
     st.session_state.last_phase = current_phase
 
     page = st.sidebar.radio(
