@@ -11,7 +11,7 @@ This module implements comprehensive comparison logic across multiple levels:
 import logging
 import re
 from enum import Enum
-from typing import Dict, List, Optional, Any
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
@@ -24,8 +24,8 @@ logger = logging.getLogger(__name__)
 class ComparisonStatus(str, Enum):
     """Status enum for comparison results."""
 
-    MATCH = ComparisonStatus.MATCH
-    DIFFER = ComparisonStatus.DIFFER
+    MATCH = "match"
+    DIFFER = "differ"
     SKIPPED = "skipped"
     ERROR = "error"
 

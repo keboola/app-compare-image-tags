@@ -8,6 +8,7 @@ This page allows users to choose between three comparison modes:
 """
 
 import streamlit as st
+
 from utils.keboola_client import KeboolaAPIClient
 
 
@@ -78,7 +79,7 @@ def display_validated_input():
 
     elif mode == "tables":
         st.success("✅ Table Comparison Mode")
-        st.info(f"**Branch:** default (main branch)")
+        st.info("**Branch:** default (main branch)")
         table_ids = st.session_state["table_ids_to_compare"]
         st.info(f"**Table 1:** {table_ids[0]}")
         st.info(f"**Table 2:** {table_ids[1]}")
@@ -565,10 +566,11 @@ def validate_table_comparison(user_token: str, kbc_url: str, table_ids: list, au
     """
     with st.spinner("Validating tables..."):
         try:
-            client = KeboolaAPIClient(token_override=user_token, kbc_url_override=kbc_url)
+            # Validate credentials by attempting to create client
+            KeboolaAPIClient(token_override=user_token, kbc_url_override=kbc_url)
 
             st.success(f"✅ Validated {len(table_ids)} table(s) for comparison")
-            st.info(f"**Branch:** default (main branch)")
+            st.info("**Branch:** default (main branch)")
             st.info(f"**Table 1:** {table_ids[0]}")
             st.info(f"**Table 2:** {table_ids[1]}")
 
@@ -684,7 +686,7 @@ def resolve_branch_id(client: KeboolaAPIClient, branch_identifier: str) -> str:
         for branch in branches:
             if branch["name"] == branch_identifier:
                 return str(branch["id"])
-    except:
+    except (KeyError, TypeError, AttributeError):
         pass
 
     # If not found, assume it's an ID

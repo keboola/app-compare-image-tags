@@ -5,10 +5,10 @@ This module provides functions for displaying comparison data in various formats
 metrics, charts, tables, and status indicators.
 """
 
-from typing import Dict, List, Any
+from typing import Any, Dict
+
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
 
 
@@ -392,11 +392,11 @@ def display_comparison_progress(production_status: str, test_status: str):
     col1, col2 = st.columns(2)
 
     with col1:
-        st.markdown(f"### Production Run")
+        st.markdown("### Production Run")
         st.markdown(f"{status_icons.get(production_status, '❓')} **{production_status.upper()}**")
 
     with col2:
-        st.markdown(f"### Test Run")
+        st.markdown("### Test Run")
         st.markdown(f"{status_icons.get(test_status, '❓')} **{test_status.upper()}**")
 
 

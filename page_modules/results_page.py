@@ -8,13 +8,14 @@ This page displays comparison results in three tabs:
 """
 
 import streamlit as st
+
 from utils.visualization import (
-    display_summary_metrics,
     display_bucket_comparison,
-    display_table_comparison,
+    display_log_comparison,
     display_metadata_differences,
     display_row_differences,
-    display_log_comparison,
+    display_summary_metrics,
+    display_table_comparison,
 )
 
 

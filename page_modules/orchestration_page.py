@@ -11,10 +11,12 @@ This page handles the orchestration of:
 
 import time
 from datetime import datetime
-import streamlit as st
+
 import requests
-from utils.keboola_client import KeboolaAPIClient
+import streamlit as st
+
 from utils.comparison_engine import ComparisonEngine
+from utils.keboola_client import KeboolaAPIClient
 
 
 def is_advanced_view() -> bool:
@@ -233,7 +235,7 @@ def setup_phase(client: KeboolaAPIClient):
                         if skip_polling:
                             add_log(
                                 "branch_creation",
-                                f"Both branches already have configurations - skipping readiness check",
+                                "Both branches already have configurations - skipping readiness check",
                                 "success",
                             )
                             add_log(
