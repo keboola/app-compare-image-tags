@@ -447,13 +447,19 @@ def display_log_comparison(log_comparison: Dict[str, Any]):
             st.markdown("#### ➖ Removed from Production (not in Test)")
             for msg in prod_only:
                 # Display in red with minus prefix (git-style)
-                st.markdown(f'<div style="background-color: #ffebe9; padding: 5px; border-left: 3px solid #d73a49; margin-bottom: 2px;"><code style="color: #d73a49;">- {msg}</code></div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div style="background-color: #ffebe9; padding: 5px; border-left: 3px solid #d73a49; margin-bottom: 2px;"><code style="color: #d73a49;">- {msg}</code></div>',
+                    unsafe_allow_html=True,
+                )
 
         if test_only:
             st.markdown("#### ➕ Added in Test (not in Production)")
             for msg in test_only:
                 # Display in green with plus prefix (git-style)
-                st.markdown(f'<div style="background-color: #d4edda; padding: 5px; border-left: 3px solid #28a745; margin-bottom: 2px;"><code style="color: #28a745;">+ {msg}</code></div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div style="background-color: #d4edda; padding: 5px; border-left: 3px solid #28a745; margin-bottom: 2px;"><code style="color: #28a745;">+ {msg}</code></div>',
+                    unsafe_allow_html=True,
+                )
 
     with tab2:
         st.markdown("### Production-Only Messages")

@@ -132,7 +132,9 @@ def create_results_page():
     log_comparison_available = results.get("log_comparison") is not None
 
     if log_comparison_available:
-        tab1, tab2, tab3, tab4 = st.tabs(["📋 Summary", "🗂️ Structure & Metadata", "🔍 Row Differences", "📝 Log Comparison"])
+        tab1, tab2, tab3, tab4 = st.tabs(
+            ["📋 Summary", "🗂️ Structure & Metadata", "🔍 Row Differences", "📝 Log Comparison"]
+        )
     else:
         tab1, tab2, tab3 = st.tabs(["📋 Summary", "🗂️ Structure & Metadata", "🔍 Row Differences"])
 
@@ -244,6 +246,27 @@ def display_differences_tab(results: dict):
     if not row_diffs:
         st.info("No row-level comparison data available")
         return
+
+    # DEBUG: Show all table statuses
+    with st.expander("🔧 DEBUG: Row Comparison Status for All Tables", expanded=False):
+        st.write("**All row comparison results:**")
+        for table_id, diff_data in row_diffs.items():
+            status = diff_data.get("status", "UNKNOWN")
+            prod_count = diff_data.get("production_row_count", "N/A")
+            test_count = diff_data.get("test_row_count", "N/A")
+            diff_count = diff_data.get("differing_rows", "N/A")
+
+            st.markdown(f"**{table_id}**")
+            st.write(f"  - Status: `{status}`")
+            st.write(f"  - Production rows: {prod_count}")
+            st.write(f"  - Test rows: {test_count}")
+            st.write(f"  - Differing rows: {diff_count}")
+
+            if status in ["error", "skipped"]:
+                st.write(f"  - Reason/Error: {diff_data.get('reason', diff_data.get('error', 'N/A'))}")
+
+            st.write(f"  - Full data: {diff_data}")
+            st.markdown("---")
 
     # Filter tables with differences
     tables_with_diffs = [table for table, diff in row_diffs.items() if diff.get("status") == "differ"]
