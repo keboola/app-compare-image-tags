@@ -506,29 +506,31 @@ class KeboolaAPIClient:
         all_buckets = response.json()
         bucket_ids = [bucket["id"] for bucket in all_buckets]
 
-        # Debug: Show what we got
-        import streamlit as st
+        # Debug output only when advanced mode is enabled
+        import re
 
-        st.write(f"🔍 **Total buckets in project:** {len(bucket_ids)}")
-        st.write(f"🔍 **Branch ID (type={type(branch_id).__name__}):** {branch_id}")
+        show_debug = st.session_state.get("show_advanced", False)
+        if show_debug:
+            with st.expander("🔧 Debug: Bucket listing", expanded=False):
+                st.write(f"Total buckets in project: {len(bucket_ids)}")
+                st.write(f"Branch ID (type={type(branch_id).__name__}): {branch_id}")
 
         if branch_id:
             # Dev branch bucket pattern: {stage}.c-{branch_id}-{bucket_name}
             # Example: in.c-20533-keboola-ex-instagram-v2-01kcrfjxt5wvms53ds3vy6x5h1
             # We need to filter for pattern and strip the branch ID from the middle
-
-            import re
-
             pattern = re.compile(rf"^(in|out)\.c-{branch_id}-(.+)$")
-            st.write(f"🔍 **Looking for pattern:** `{{stage}}.c-{branch_id}-{{bucket_name}}`")
 
-            # Show which buckets match
-            matching = [bid for bid in bucket_ids if branch_id in bid]
-            st.write(f"🔍 **Buckets containing '{branch_id}' anywhere:** {len(matching)}")
-            if matching:
-                st.write("🔍 **Matching bucket examples:**")
-                for bid in matching[:10]:
-                    st.text(f"  - {bid}")
+            if show_debug:
+                with st.expander("🔧 Debug: Branch bucket filtering", expanded=False):
+                    st.write(f"Looking for pattern: `{{stage}}.c-{branch_id}-{{bucket_name}}`")
+                    # Show which buckets match
+                    matching = [bid for bid in bucket_ids if branch_id in bid]
+                    st.write(f"Buckets containing '{branch_id}' anywhere: {len(matching)}")
+                    if matching:
+                        st.write("Matching bucket examples:")
+                        for bid in matching[:10]:
+                            st.text(f"  - {bid}")
 
             # Filter and strip branch ID from middle
             filtered_buckets = []
@@ -540,15 +542,17 @@ class KeboolaAPIClient:
                     # Return as: {stage}.c-{bucket_name} (without branch ID)
                     filtered_buckets.append(f"{stage}.c-{bucket_name}")
 
-            st.write(f"🔍 **Buckets matching pattern:** {len(filtered_buckets)}")
-            st.write(f"🔍 **Filtered bucket IDs (branch ID stripped):** {filtered_buckets}")
+            if show_debug:
+                with st.expander("🔧 Debug: Filtered buckets", expanded=False):
+                    st.write(f"Buckets matching pattern: {len(filtered_buckets)}")
+                    st.write(f"Filtered bucket IDs (branch ID stripped): {filtered_buckets}")
             return filtered_buckets
         else:
             # For default branch, return buckets without any numeric prefix pattern
-            import re
-
             default_buckets = [bucket_id for bucket_id in bucket_ids if not re.match(r"^\d+-", bucket_id)]
-            st.write(f"🔍 **Default branch buckets:** {len(default_buckets)}")
+            if show_debug:
+                with st.expander("🔧 Debug: Default branch buckets", expanded=False):
+                    st.write(f"Default branch buckets: {len(default_buckets)}")
             return default_buckets
 
     @st.cache_data(ttl=300)
