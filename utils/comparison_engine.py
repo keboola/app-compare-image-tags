@@ -765,10 +765,10 @@ class ComparisonEngine:
         """
         try:
             # Debugging info
-            print("\n--- DEBUG DATA COMPARISON ---")
-            print(f"Primary Keys: {primary_keys} (type: {[type(k) for k in primary_keys]})")
-            print(f"Prod Columns: {df_prod.columns.tolist()}")
-            print(f"Prod Data Sample: {df_prod.head(2).to_dict(orient='records')}")
+            logger.debug("DEBUG DATA COMPARISON")
+            logger.debug("Primary Keys: %s (type: %s)", primary_keys, [type(k) for k in primary_keys])
+            logger.debug("Prod Columns: %s", df_prod.columns.tolist())
+            logger.debug("Prod Data Sample: %s", df_prod.head(2).to_dict(orient="records"))
 
             # SAFETY: Ensure all columns are strings to prevent sorting errors
             df_prod.columns = df_prod.columns.astype(str)
@@ -779,8 +779,8 @@ class ComparisonEngine:
                 sorted_prod_cols = sorted(df_prod.columns)
                 sorted_test_cols = sorted(df_test.columns)
             except TypeError as e:
-                print(f"ERROR SORTING COLUMNS: {e}")
-                print(f"Prod Cols Type: {[type(c) for c in df_prod.columns]}")
+                logger.error("ERROR SORTING COLUMNS: %s", e)
+                logger.error("Prod Cols Type: %s", [type(c) for c in df_prod.columns])
                 raise e
 
             df_prod = df_prod.reindex(sorted_prod_cols, axis=1)
@@ -907,10 +907,7 @@ class ComparisonEngine:
             return diff_summary
 
         except Exception as e:
-            import traceback
-
-            print("\n--- PANDAS FALLBACK ERROR ---")
-            traceback.print_exc()
+            logger.exception("PANDAS FALLBACK ERROR: %s", e)
             return {"status": "error", "error": str(e), "message": "Failed to compare DataFrames"}
 
     def _compare_job_logs(self) -> Optional[Dict[str, Any]]:
@@ -1378,13 +1375,8 @@ class ComparisonEngine:
                 st.warning(f"⚠️ Metadata differences found between `{table_id_1}` and `{table_id_2}`")
 
         except Exception as e:
-            import traceback
-
             st.error(f"❌ Error comparing metadata: {str(e)}")
-            # Use print to ensure visibility in pytest output
-            print(f"\n--- METADATA ERROR TRACEBACK START ---\n")
-            print(traceback.format_exc())
-            print(f"\n--- METADATA ERROR TRACEBACK END ---\n")
+            logger.exception("METADATA ERROR for %s: %s", virtual_id, e)
             results["metadata_comparison"][virtual_id] = {"status": "error", "error": str(e)}
 
         # 4. Data Comparison
