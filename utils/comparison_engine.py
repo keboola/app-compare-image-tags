@@ -8,11 +8,30 @@ This module implements comprehensive comparison logic across multiple levels:
 - Row-level comparison (actual data differences)
 """
 
+import logging
+import re
 from typing import Dict, List, Optional, Any
+
 import pandas as pd
 import streamlit as st
 
 from .keboola_client import KeboolaAPIClient
+
+logger = logging.getLogger(__name__)
+
+
+def _sanitize_sql_identifier(name: str) -> str:
+    """Validate and quote SQL identifier to prevent injection."""
+    if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", name):
+        # For identifiers with special chars, escape internal quotes
+        escaped = name.replace('"', '""')
+        return f'"{escaped}"'
+    return f'"{name}"'
+
+
+def _validate_table_id(table_id: str) -> bool:
+    """Validate table ID format."""
+    return bool(re.match(r"^(in|out)\.c-[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+$", table_id))
 
 
 class ComparisonEngine:
@@ -579,12 +598,19 @@ class ComparisonEngine:
         Returns:
             Comparison results dictionary
         """
+        # Validate table ID format
+        if not _validate_table_id(table_id):
+            raise ValueError(f"Invalid table ID format: {table_id}")
+
+        # Validate and sanitize row_limit
+        row_limit = max(1, min(int(row_limit), 100000))
+
         # Get qualified table names
         prod_table = self.client.get_qualified_table_name(table_id, prod_branch)
         test_table = self.client.get_qualified_table_name(table_id, test_branch)
 
-        # Build column list (sorted for consistency)
-        column_list = ", ".join([f'"{col}"' for col in sorted(columns)])
+        # Build column list (sorted for consistency) with sanitization
+        column_list = ", ".join([_sanitize_sql_identifier(col) for col in sorted(columns)])
 
         # Strategy: Use EXCEPT to find rows that differ
         # EXCEPT returns rows in first query that are not in second query
@@ -1351,7 +1377,7 @@ class ComparisonEngine:
 
                 common_cols = meta["columns"]["common"]
 
-                column_list = ", ".join([f'"{col}"' for col in sorted(common_cols)])
+                column_list = ", ".join([_sanitize_sql_identifier(col) for col in sorted(common_cols)])
 
                 # SQL EXCEPT logic for different tables
                 query_1_not_2 = f"""
