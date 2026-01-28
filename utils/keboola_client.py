@@ -68,6 +68,10 @@ class KeboolaAPIClient:
 
         self.headers = {"X-StorageApi-Token": self.token}
 
+    def _normalize_branch_id(self, branch_id: Optional[str]) -> Optional[str]:
+        """Normalize branch_id to string or None."""
+        return str(branch_id) if branch_id is not None else None
+
     # ==================== Configuration Management ====================
 
     @st.cache_data(ttl=3600)
@@ -491,9 +495,7 @@ class KeboolaAPIClient:
         Returns:
             List of bucket IDs (without branch prefix for dev branches)
         """
-        # CRITICAL FIX: Convert branch_id to string if provided
-        if branch_id is not None:
-            branch_id = str(branch_id)
+        branch_id = _self._normalize_branch_id(branch_id)
 
         # Always use the regular buckets endpoint (no branch in URL)
         url = f"{_self.storage_url}/v2/storage/buckets"
@@ -561,9 +563,7 @@ class KeboolaAPIClient:
         Returns:
             List of table names (without bucket prefix)
         """
-        # CRITICAL FIX: Convert branch_id to string if provided
-        if branch_id is not None:
-            branch_id = str(branch_id)
+        branch_id = _self._normalize_branch_id(branch_id)
 
         # Add branch ID to bucket_id if in dev branch
         # Pattern: bucket_id="in.c-mybucket" -> full_bucket_id="in.c-20533-mybucket"
@@ -600,9 +600,7 @@ class KeboolaAPIClient:
         Returns:
             Table metadata dictionary including columns, PKs, types, row count
         """
-        # CRITICAL FIX: Convert branch_id to string if provided
-        if branch_id is not None:
-            branch_id = str(branch_id)
+        branch_id = _self._normalize_branch_id(branch_id)
 
         # Add branch ID to table_id if in dev branch
         # Pattern: "in.c-bucket.table" -> "in.c-20533-bucket.table"
@@ -964,9 +962,7 @@ class KeboolaAPIClient:
         Returns:
             DataFrame with preview data
         """
-        # CRITICAL FIX: Convert branch_id to string if provided
-        if branch_id is not None:
-            branch_id = str(branch_id)
+        branch_id = self._normalize_branch_id(branch_id)
 
         # Handle branch logic for table ID
         if branch_id:
@@ -1055,9 +1051,7 @@ class KeboolaAPIClient:
         Returns:
             Qualified table name for SQL queries (e.g., "in.c-20533-bucket"."table")
         """
-        # CRITICAL FIX: Convert branch_id to string if provided
-        if branch_id is not None:
-            branch_id = str(branch_id)
+        branch_id = _self._normalize_branch_id(branch_id)
 
         # Add branch ID to table_id if in dev branch
         if branch_id:
