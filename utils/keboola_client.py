@@ -645,7 +645,7 @@ class KeboolaAPIClient:
 
     def run_component(self, component_id: str, config_id: str, branch_id: Optional[str] = None) -> Dict[str, Any]:
         """
-        Trigger a component run.
+        Trigger a component run in debug mode.
 
         Args:
             component_id: Component ID
@@ -657,7 +657,7 @@ class KeboolaAPIClient:
         """
         url = f"{self.queue_url}/jobs"
 
-        payload = {"mode": "run", "component": component_id, "config": config_id}
+        payload = {"mode": "debug", "component": component_id, "config": config_id}
 
         if branch_id:
             payload["branchId"] = str(branch_id)
