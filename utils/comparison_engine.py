@@ -47,6 +47,13 @@ def _validate_table_id(table_id: str) -> bool:
 class ComparisonEngine:
     """Executes bucket, table, metadata, and row-level comparisons."""
 
+    # Configuration constants
+    DEFAULT_ROW_LIMIT = 1000
+    MAX_ROW_LIMIT = 100_000
+    PREVIEW_ROW_LIMIT = 1_000
+    SAMPLE_DISPLAY_LIMIT = 5
+    SAMPLE_DIFF_LIMIT = 10
+
     def __init__(self, client: KeboolaAPIClient):
         """
         Initialize comparison engine.
@@ -516,7 +523,7 @@ class ComparisonEngine:
         """
         # Read row_limit from session state if not provided
         if row_limit is None:
-            row_limit = st.session_state.get("comparison_row_limit", 1000)
+            row_limit = st.session_state.get("comparison_row_limit", self.DEFAULT_ROW_LIMIT)
 
         results = {}
 
@@ -568,7 +575,7 @@ class ComparisonEngine:
                 # Fallback to pandas comparison using data-preview API
                 try:
                     # Use data-preview endpoint which doesn't require workspace credentials
-                    preview_limit = min(row_limit, 1000)  # data-preview typically limits to 1000 rows
+                    preview_limit = min(row_limit, self.PREVIEW_ROW_LIMIT)  # data-preview typically limits to 1000 rows
 
                     # Check for truncation and warn user
                     prod_row_count = meta.get("row_count", {}).get("production", 0)
@@ -633,8 +640,8 @@ class ComparisonEngine:
 
         # Read row_limit from session state if not provided, then validate
         if row_limit is None:
-            row_limit = st.session_state.get("comparison_row_limit", 1000)
-        row_limit = max(1, min(int(row_limit), 100000))
+            row_limit = st.session_state.get("comparison_row_limit", self.DEFAULT_ROW_LIMIT)
+        row_limit = max(1, min(int(row_limit), self.MAX_ROW_LIMIT))
 
         # Get qualified table names
         prod_table = self.client.get_qualified_table_name(table_id, prod_branch)
@@ -733,7 +740,7 @@ class ComparisonEngine:
         if not prod_only_df.empty or not test_only_df.empty:
             # Get sample rows with primary keys if available
             if primary_keys and all(pk in prod_only_df.columns for pk in primary_keys):
-                sample_prod = prod_only_df.head(5)
+                sample_prod = prod_only_df.head(self.SAMPLE_DISPLAY_LIMIT)
                 for idx, row in sample_prod.iterrows():
                     pk_dict = {pk: row[pk] for pk in primary_keys}
                     result["sample_differences"].append(
@@ -745,7 +752,7 @@ class ComparisonEngine:
                     )
 
             if primary_keys and all(pk in test_only_df.columns for pk in primary_keys):
-                sample_test = test_only_df.head(5)
+                sample_test = test_only_df.head(self.SAMPLE_DISPLAY_LIMIT)
                 for idx, row in sample_test.iterrows():
                     pk_dict = {pk: row[pk] for pk in primary_keys}
                     result["sample_differences"].append(
@@ -845,7 +852,7 @@ class ComparisonEngine:
 
             # Add unique rows to sample differences
             if n_prod_only > 0:
-                sample_prod = df_prod.loc[prod_only_idx].head(5)
+                sample_prod = df_prod.loc[prod_only_idx].head(self.SAMPLE_DISPLAY_LIMIT)
                 for idx, row in sample_prod.iterrows():
                     # Build PK dict
                     if isinstance(idx, tuple):
@@ -864,7 +871,7 @@ class ComparisonEngine:
                     )
 
             if n_test_only > 0:
-                sample_test = df_test.loc[test_only_idx].head(5)
+                sample_test = df_test.loc[test_only_idx].head(self.SAMPLE_DISPLAY_LIMIT)
                 for idx, row in sample_test.iterrows():
                     # Build PK dict
                     if isinstance(idx, tuple):
@@ -889,7 +896,7 @@ class ComparisonEngine:
                     diff_summary["column_differences"][col] = count
 
                 # Get sample differences (first 10)
-                sample_rows = differences_df.head(10)
+                sample_rows = differences_df.head(self.SAMPLE_DIFF_LIMIT)
                 for idx in sample_rows.index:
                     for col in differences_df.columns.get_level_values(0).unique():
                         try:
@@ -1416,17 +1423,17 @@ class ComparisonEngine:
 
                 # SQL EXCEPT logic for different tables
                 query_1_not_2 = f"""
-                SELECT {column_list} FROM {t1_qualified} 
-                EXCEPT 
-                SELECT {column_list} FROM {t2_qualified} 
-                LIMIT 1000
+                SELECT {column_list} FROM {t1_qualified}
+                EXCEPT
+                SELECT {column_list} FROM {t2_qualified}
+                LIMIT {self.PREVIEW_ROW_LIMIT}
                 """
 
                 query_2_not_1 = f"""
-                SELECT {column_list} FROM {t2_qualified} 
-                EXCEPT 
-                SELECT {column_list} FROM {t1_qualified} 
-                LIMIT 1000
+                SELECT {column_list} FROM {t2_qualified}
+                EXCEPT
+                SELECT {column_list} FROM {t1_qualified}
+                LIMIT {self.PREVIEW_ROW_LIMIT}
                 """
 
                 df_1_not_2 = self.client.execute_query(query_1_not_2)
@@ -1485,7 +1492,7 @@ class ComparisonEngine:
                 try:
                     # Fallback to pandas using data-preview (no workspace required)
                     # Note: limit is usually small (100) for preview, but let's try 1000 if API allows
-                    preview_limit = 1000
+                    preview_limit = self.PREVIEW_ROW_LIMIT
 
                     # Check for truncation and warn user
                     prod_row_count = meta.get("row_count", {}).get("production", 0)
