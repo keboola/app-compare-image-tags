@@ -10,6 +10,7 @@ This module implements comprehensive comparison logic across multiple levels:
 
 import logging
 import re
+from enum import Enum
 from typing import Dict, List, Optional, Any
 
 import pandas as pd
@@ -18,6 +19,15 @@ import streamlit as st
 from .keboola_client import KeboolaAPIClient
 
 logger = logging.getLogger(__name__)
+
+
+class ComparisonStatus(str, Enum):
+    """Status enum for comparison results."""
+
+    MATCH = ComparisonStatus.MATCH
+    DIFFER = ComparisonStatus.DIFFER
+    SKIPPED = "skipped"
+    ERROR = "error"
 
 
 def _sanitize_sql_identifier(name: str) -> str:
@@ -180,7 +190,7 @@ class ComparisonEngine:
             "production_only": prod_only,
             "test_only": test_only,
             "common": common,
-            "status": "match" if prod_buckets == test_buckets else "differ",
+            "status": ComparisonStatus.MATCH if prod_buckets == test_buckets else ComparisonStatus.DIFFER,
             "_debug": {
                 "production_buckets": sorted(prod_buckets),
                 "test_buckets": sorted(test_buckets),
@@ -245,7 +255,7 @@ class ComparisonEngine:
                 "production_only": prod_only,
                 "test_only": test_only,
                 "common": common,
-                "status": "match" if prod_tables == test_tables else "differ",
+                "status": ComparisonStatus.MATCH if prod_tables == test_tables else ComparisonStatus.DIFFER,
             }
 
         return results
@@ -311,7 +321,7 @@ class ComparisonEngine:
                         "columns": col_comparison,
                         "data_types": type_comparison,
                         "row_count": count_comparison,
-                        "status": "match" if all_match else "differ",
+                        "status": ComparisonStatus.MATCH if all_match else ComparisonStatus.DIFFER,
                     }
 
                     # Show detailed success/warning for this table
@@ -343,7 +353,7 @@ class ComparisonEngine:
 
                 except Exception as e:
                     st.error(f"❌ Error comparing metadata for table `{table_id}`: {str(e)}")
-                    results[table_id] = {"status": "error", "error": str(e)}
+                    results[table_id] = {"status": ComparisonStatus.ERROR, "error": str(e)}
 
         return results
 
@@ -512,8 +522,8 @@ class ComparisonEngine:
 
         for table_id, meta in metadata_comparison.items():
             # Skip if metadata doesn't match or error occurred
-            if meta.get("status") == "error":
-                results[table_id] = {"status": "skipped", "reason": f"Metadata error: {meta.get('error')}"}
+            if meta.get("status") == ComparisonStatus.ERROR:
+                results[table_id] = {"status": ComparisonStatus.SKIPPED, "reason": f"Metadata error: {meta.get('error')}"}
                 continue
 
             # Skip if ANY metadata doesn't match (primary keys, columns, data types)
@@ -533,7 +543,7 @@ class ComparisonEngine:
 
                 # Note: Row count mismatch is NOT a reason to skip row comparison
 
-                results[table_id] = {"status": "skipped", "reason": f"Metadata mismatch: {', '.join(mismatch_reasons)}"}
+                results[table_id] = {"status": ComparisonStatus.SKIPPED, "reason": f"Metadata mismatch: {', '.join(mismatch_reasons)}"}
                 st.info(f"ℹ️ Skipping row comparison for `{table_id}`: metadata differs ({', '.join(mismatch_reasons)})")
                 continue
 
@@ -585,7 +595,7 @@ class ComparisonEngine:
 
                 except Exception as fallback_error:
                     results[table_id] = {
-                        "status": "error",
+                        "status": ComparisonStatus.ERROR,
                         "error": str(fallback_error),
                         "message": "Failed to compare row data",
                     }
@@ -711,12 +721,12 @@ class ComparisonEngine:
 
         # If tables match perfectly
         if total_differences == 0 and prod_count == test_count:
-            result["status"] = "match"
+            result["status"] = ComparisonStatus.MATCH
             st.success(f"✅ Table `{table_id}`: Perfect match ({prod_count:,} rows)")
             return result
 
         # Tables differ
-        result["status"] = "differ"
+        result["status"] = ComparisonStatus.DIFFER
 
         # Generate sample differences for display
         if not prod_only_df.empty or not test_only_df.empty:
@@ -903,12 +913,12 @@ class ComparisonEngine:
                         except (KeyError, IndexError, TypeError):
                             continue
 
-            diff_summary["status"] = "match" if total_differences == 0 else "differ"
+            diff_summary["status"] = ComparisonStatus.MATCH if total_differences == 0 else ComparisonStatus.DIFFER
             return diff_summary
 
         except Exception as e:
             logger.exception("PANDAS FALLBACK ERROR: %s", e)
-            return {"status": "error", "error": str(e), "message": "Failed to compare DataFrames"}
+            return {"status": ComparisonStatus.ERROR, "error": str(e), "message": "Failed to compare DataFrames"}
 
     def _compare_job_logs(self) -> Optional[Dict[str, Any]]:
         """
@@ -1003,10 +1013,10 @@ class ComparisonEngine:
                 "test_only_messages": test_only_messages,
                 "production_events": prod_events,  # Full event data
                 "test_events": test_events,  # Full event data
-                "status": "match" if prod_set == test_set else "differ",
+                "status": ComparisonStatus.MATCH if prod_set == test_set else ComparisonStatus.DIFFER,
             }
 
-            if result["status"] == "match":
+            if result["status"] == ComparisonStatus.MATCH:
                 st.success("✅ Job logs match perfectly")
             else:
                 st.warning(
@@ -1018,7 +1028,7 @@ class ComparisonEngine:
         except Exception as e:
             st.error(f"❌ Failed to compare job logs: {str(e)}")
             st.exception(e)
-            return {"status": "error", "error": str(e)}
+            return {"status": ComparisonStatus.ERROR, "error": str(e)}
 
     def _generate_summary(self, comparison_results: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -1037,18 +1047,18 @@ class ComparisonEngine:
 
         # Count totals
         total_buckets = len(bucket_comp["common"]) + len(bucket_comp["production_only"]) + len(bucket_comp["test_only"])
-        matching_buckets = len(bucket_comp["common"]) if bucket_comp["status"] == "match" else 0
+        matching_buckets = len(bucket_comp["common"]) if bucket_comp["status"] == ComparisonStatus.MATCH else 0
 
         # Count tables
         total_tables = sum(
             len(comp["common"]) + len(comp["production_only"]) + len(comp["test_only"]) for comp in table_comp.values()
         )
-        matching_tables = sum(len(comp["common"]) if comp["status"] == "match" else 0 for comp in table_comp.values())
+        matching_tables = sum(len(comp["common"]) if comp["status"] == ComparisonStatus.MATCH else 0 for comp in table_comp.values())
 
         # Count differences
-        tables_with_metadata_diffs = sum(1 for meta in meta_comp.values() if meta.get("status") == "differ")
+        tables_with_metadata_diffs = sum(1 for meta in meta_comp.values() if meta.get("status") == ComparisonStatus.DIFFER)
 
-        tables_with_row_diffs = sum(1 for row in row_comp.values() if row.get("status") == "differ")
+        tables_with_row_diffs = sum(1 for row in row_comp.values() if row.get("status") == ComparisonStatus.DIFFER)
 
         # Generate key findings
         key_findings = []
@@ -1071,15 +1081,15 @@ class ComparisonEngine:
 
         # Determine overall status
         overall_status = (
-            "match"
+            ComparisonStatus.MATCH
             # Buckets: Match OR Skipped (don't fail if skipped)
             if (
-                (bucket_comp["status"] == "match" or bucket_comp["status"] == "skipped")
-                and all(t["status"] == "match" for t in table_comp.values())
+                (bucket_comp["status"] == ComparisonStatus.MATCH or bucket_comp["status"] == ComparisonStatus.SKIPPED)
+                and all(t["status"] == ComparisonStatus.MATCH for t in table_comp.values())
                 and tables_with_metadata_diffs == 0
                 and tables_with_row_diffs == 0
             )
-            else "differ"
+            else ComparisonStatus.DIFFER
         )
 
         return {
@@ -1122,7 +1132,7 @@ class ComparisonEngine:
             "production_only": [],
             "test_only": [],
             "common": [],
-            "status": "skipped",
+            "status": ComparisonStatus.SKIPPED,
             "_mode": "tables",
         }
 
@@ -1138,7 +1148,7 @@ class ComparisonEngine:
                         "production_only": [],
                         "test_only": [],
                         "common": [],
-                        "status": "match",
+                        "status": ComparisonStatus.MATCH,
                     }
                 results["table_comparison"][bucket_id]["common"].append(parts[1])
 
@@ -1168,7 +1178,7 @@ class ComparisonEngine:
                     "columns": col_comparison,
                     "data_types": type_comparison,
                     "row_count": count_comparison,
-                    "status": "match" if all_match else "differ",
+                    "status": ComparisonStatus.MATCH if all_match else ComparisonStatus.DIFFER,
                 }
 
                 if all_match:
@@ -1178,7 +1188,7 @@ class ComparisonEngine:
 
             except Exception as e:
                 st.error(f"❌ Error comparing metadata for table `{table_id}`: {str(e)}")
-                results["metadata_comparison"][table_id] = {"status": "error", "error": str(e)}
+                results["metadata_comparison"][table_id] = {"status": ComparisonStatus.ERROR, "error": str(e)}
 
         # Level 4: Row-level comparison
         st.markdown("---")
@@ -1228,7 +1238,7 @@ class ComparisonEngine:
             "production_only": [],
             "test_only": [],
             "common": bucket_ids,  # We're explicitly comparing these buckets
-            "status": "match",
+            "status": ComparisonStatus.MATCH,
             "_mode": "buckets",
         }
         st.success(f"✅ Comparing {len(bucket_ids)} specified bucket(s)")
@@ -1260,7 +1270,7 @@ class ComparisonEngine:
                     "production_only": prod_only,
                     "test_only": test_only,
                     "common": common,
-                    "status": "match" if prod_tables == test_tables else "differ",
+                    "status": ComparisonStatus.MATCH if prod_tables == test_tables else ComparisonStatus.DIFFER,
                 }
             except Exception as e:
                 st.error(f"❌ Error comparing tables in bucket `{bucket_id}`: {str(e)}")
@@ -1268,7 +1278,7 @@ class ComparisonEngine:
                     "production_only": [],
                     "test_only": [],
                     "common": [],
-                    "status": "error",
+                    "status": ComparisonStatus.ERROR,
                     "error": str(e),
                 }
 
@@ -1321,7 +1331,7 @@ class ComparisonEngine:
             "production_only": [],
             "test_only": [],
             "common": [],
-            "status": "skipped",
+            "status": ComparisonStatus.SKIPPED,
             "_mode": "tables_direct",
         }
 
@@ -1332,7 +1342,7 @@ class ComparisonEngine:
                 "production_only": [],
                 "test_only": [],
                 "common": [f"{table_id_1} vs {table_id_2}"],
-                "status": "match",
+                "status": ComparisonStatus.MATCH,
             }
         }
 
@@ -1366,7 +1376,7 @@ class ComparisonEngine:
                 "columns": col_comparison,
                 "data_types": type_comparison,
                 "row_count": count_comparison,
-                "status": "match" if all_match else "differ",
+                "status": ComparisonStatus.MATCH if all_match else ComparisonStatus.DIFFER,
             }
 
             if all_match:
@@ -1377,20 +1387,20 @@ class ComparisonEngine:
         except Exception as e:
             st.error(f"❌ Error comparing metadata: {str(e)}")
             logger.exception("METADATA ERROR for %s: %s", virtual_id, e)
-            results["metadata_comparison"][virtual_id] = {"status": "error", "error": str(e)}
+            results["metadata_comparison"][virtual_id] = {"status": ComparisonStatus.ERROR, "error": str(e)}
 
         # 4. Data Comparison
         st.markdown("---")
         st.markdown("## Step 2: Row-Level Data Comparison")
 
         meta = results["metadata_comparison"][virtual_id]
-        if meta.get("status") == "error":
-            results["row_differences"] = {virtual_id: {"status": "skipped", "reason": "Metadata error"}}
+        if meta.get("status") == ComparisonStatus.ERROR:
+            results["row_differences"] = {virtual_id: {"status": ComparisonStatus.SKIPPED, "reason": "Metadata error"}}
 
         # Check standard gating (PKs/Columns/Types must match)
         elif not meta["primary_keys"]["match"] or not meta["columns"]["match"] or not meta["data_types"]["match"]:
             results["row_differences"] = {
-                virtual_id: {"status": "skipped", "reason": "Metadata mismatch (PKs, Columns, or Types)"}
+                virtual_id: {"status": ComparisonStatus.SKIPPED, "reason": "Metadata mismatch (PKs, Columns, or Types)"}
             }
             st.info("ℹ️ Skipping row comparison: Critical metadata differs")
         else:
@@ -1446,7 +1456,7 @@ class ComparisonEngine:
                     "differing_rows": total_diffs,
                     "identical_rows": identical_rows,
                     "identical_rows_note": identical_rows_note,
-                    "status": "match" if total_diffs == 0 and c1 == c2 else "differ",
+                    "status": ComparisonStatus.MATCH if total_diffs == 0 and c1 == c2 else ComparisonStatus.DIFFER,
                     "sample_differences": [],
                 }
 
@@ -1498,7 +1508,7 @@ class ComparisonEngine:
 
                     results["row_differences"] = {virtual_id: comparison}
 
-                    if comparison.get("status") == "match":
+                    if comparison.get("status") == ComparisonStatus.MATCH:
                         st.success(f"✅ Data matches perfectly (Pandas comparison, {len(prod_data)} rows)")
                     else:
                         diff_rows = comparison.get("differing_rows", "unknown")
@@ -1506,7 +1516,7 @@ class ComparisonEngine:
 
                 except Exception as fallback_e:
                     st.error(f"❌ Data comparison failed (both SQL and Pandas): {str(fallback_e)}")
-                    results["row_differences"] = {virtual_id: {"status": "error", "error": str(fallback_e)}}
+                    results["row_differences"] = {virtual_id: {"status": ComparisonStatus.ERROR, "error": str(fallback_e)}}
 
         # Generate summary
         st.markdown("---")
