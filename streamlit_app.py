@@ -22,14 +22,28 @@ def main():
     st.sidebar.title("🔍 Output Comparison")
     st.sidebar.markdown("---")
 
-    # Determine current phase based on session state
+    # Determine current phase based on session state (for suggested navigation)
     current_phase = determine_current_phase()
 
-    # Page selection
+    # Page selection - preserve user's choice, only auto-navigate on phase transitions
     page_options = ["📝 Input", "⚙️ Execution", "📊 Results"]
-    page_index = ["input", "execution", "results"].index(current_phase)
+    phase_to_index = {"input": 0, "execution": 1, "results": 2}
 
-    page = st.sidebar.radio("Navigation", page_options, index=page_index)
+    # Initialize or update navigation state
+    if "current_nav_page" not in st.session_state:
+        st.session_state.current_nav_page = phase_to_index[current_phase]
+    elif st.session_state.get("last_phase") != current_phase:
+        # Only auto-navigate when phase actually changes (e.g., comparison completes)
+        st.session_state.current_nav_page = phase_to_index[current_phase]
+    st.session_state.last_phase = current_phase
+
+    page = st.sidebar.radio(
+        "Navigation",
+        page_options,
+        index=st.session_state.current_nav_page,
+        key="nav_radio",
+        on_change=lambda: setattr(st.session_state, "current_nav_page", page_options.index(st.session_state.nav_radio)),
+    )
 
     # Display current status in sidebar
     st.sidebar.markdown("---")
@@ -114,6 +128,7 @@ def initialize_session_state():
         "production_image_tag": "latest",
         "test_image_tag": None,
         "branch_name": "comparison-test",
+        "job_mode": "run",
         "component_id": None,
         "original_config": None,
         # Tables/Buckets mode fields

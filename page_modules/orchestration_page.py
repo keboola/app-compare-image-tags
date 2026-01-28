@@ -577,26 +577,31 @@ def execution_phase(client: KeboolaAPIClient):
                         st.write("Production Branch ID:", st.session_state["production_branch_id"])
                         st.write("Test Branch ID:", st.session_state["test_branch_id"])
 
+                # Get job mode from session state (default to "run")
+                job_mode = st.session_state.get("job_mode", "run")
+
                 # Trigger production run (production branch with production tag)
                 add_log(
                     "job_execution",
-                    f"Triggering production job in branch {st.session_state['production_branch_id']}...",
+                    f"Triggering production job in branch {st.session_state['production_branch_id']} (mode: {job_mode})...",
                 )
                 prod_job = client.run_component(
                     st.session_state["component_id"],
                     st.session_state["config_id"],
                     branch_id=st.session_state["production_branch_id"],
+                    mode=job_mode,
                 )
                 st.session_state.production_job_id = prod_job["id"]
                 st.session_state.production_job_status = "waiting"
                 add_log("job_execution", f"Production job triggered (ID: {prod_job['id']})", "success")
 
                 # Trigger test run (test branch with test tag)
-                add_log("job_execution", f"Triggering test job in branch {st.session_state['test_branch_id']}...")
+                add_log("job_execution", f"Triggering test job in branch {st.session_state['test_branch_id']} (mode: {job_mode})...")
                 test_job = client.run_component(
                     st.session_state["component_id"],
                     st.session_state["config_id"],
                     branch_id=st.session_state["test_branch_id"],
+                    mode=job_mode,
                 )
                 st.session_state.test_job_id = test_job["id"]
                 st.session_state.test_job_status = "waiting"

@@ -58,6 +58,7 @@ def display_validated_input():
         st.info(f"**Component:** {st.session_state['component_id']}")
         st.info(f"**Production Tag:** {st.session_state['production_image_tag']}")
         st.info(f"**Test Tag:** {st.session_state['test_image_tag']}")
+        st.info(f"**Job Mode:** {st.session_state.get('job_mode', 'run')}")
 
     elif mode == "tables":
         st.success("✅ Table Comparison Mode")
@@ -190,6 +191,14 @@ def create_config_comparison_form():
             help="Name for dev branch (will create if doesn't exist)",
         )
 
+        job_mode = st.selectbox(
+            "Job Mode",
+            options=["run", "debug"],
+            index=0 if st.session_state.get("job_mode", "run") == "run" else 1,
+            key="widget_job_mode",
+            help="'run' executes normally, 'debug' provides more detailed logs but may behave differently",
+        )
+
         st.markdown("---")
 
         auto_run = st.checkbox(
@@ -216,7 +225,7 @@ def create_config_comparison_form():
             return
 
         validate_config_comparison(
-            config_id, component_id, config_input, production_tag, test_tag, branch_name, user_token, auto_run
+            config_id, component_id, config_input, production_tag, test_tag, branch_name, user_token, auto_run, job_mode
         )
 
 
@@ -450,6 +459,7 @@ def validate_config_comparison(
     branch_name: str,
     user_token: str,
     auto_run: bool,
+    job_mode: str = "run",
 ):
     """
     Validate configuration comparison inputs and prepare for execution.
@@ -463,6 +473,7 @@ def validate_config_comparison(
         branch_name: Development branch name
         user_token: User's Keboola admin token (with branch creation permissions)
         auto_run: Whether to automatically run all steps to completion
+        job_mode: Job execution mode - "run" (default) or "debug"
     """
     with st.spinner("Validating configuration..."):
         try:
@@ -501,6 +512,7 @@ def validate_config_comparison(
             st.session_state.original_config = config
             st.session_state.component_id = component_id
             st.session_state.auto_run = auto_run
+            st.session_state.job_mode = job_mode
 
             st.success("✅ Configuration validated successfully!")
             if auto_run:

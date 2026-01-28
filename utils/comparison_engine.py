@@ -532,10 +532,12 @@ class ComparisonEngine:
                 # Log SQL comparison failure
                 st.warning(f"⚠️ SQL comparison failed for `{table_id}`, using pandas fallback: {str(e)}")
 
-                # Fallback to pandas comparison
+                # Fallback to pandas comparison using data-preview API
                 try:
-                    prod_data = self.client.query_table_data(table_id, prod_branch, limit=row_limit)
-                    test_data = self.client.query_table_data(table_id, test_branch, limit=row_limit)
+                    # Use data-preview endpoint which doesn't require workspace credentials
+                    preview_limit = min(row_limit, 1000)  # data-preview typically limits to 1000 rows
+                    prod_data = self.client.get_table_data_preview(table_id, prod_branch, limit=preview_limit)
+                    test_data = self.client.get_table_data_preview(table_id, test_branch, limit=preview_limit)
 
                     comparison = self._detailed_dataframe_comparison(
                         prod_data, test_data, meta["primary_keys"]["production"]

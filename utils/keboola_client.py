@@ -7,10 +7,10 @@ including configuration management, branch operations, job execution, and data q
 
 import json
 import time
-from typing import Optional, Dict, List, Any
-from urllib.parse import urlencode
-import requests
+from typing import Any, Dict, List, Optional
+
 import pandas as pd
+import requests
 import streamlit as st
 
 from .config import get_config
@@ -61,6 +61,10 @@ class KeboolaAPIClient:
         # Example: https://connection.north-europe.azure.keboola.com -> https://queue.north-europe.azure.keboola.com
         region_part = self.storage_url.split("//")[1]  # "connection.north-europe.azure.keboola.com"
         self.queue_url = f"https://queue.{'.'.join(region_part.split('.')[1:])}"
+
+        # Query Service is regional (same pattern as other services)
+        # Example: https://connection.us-east4.gcp.keboola.com -> https://query.us-east4.gcp.keboola.com
+        self.query_service_url = f"https://query.{'.'.join(region_part.split('.')[1:])}"
 
         self.headers = {"X-StorageApi-Token": self.token}
 
@@ -457,7 +461,7 @@ class KeboolaAPIClient:
 
         # Try to create, but handle case where it already exists
         try:
-            return self.create_branch(name, f"Comparison test branch created by data app")
+            return self.create_branch(name, "Comparison test branch created by data app")
         except ValueError as e:
             if "duplicateName" in str(e):
                 # Branch was just created, fetch the fresh list again
@@ -520,7 +524,7 @@ class KeboolaAPIClient:
             matching = [bid for bid in bucket_ids if branch_id in bid]
             st.write(f"🔍 **Buckets containing '{branch_id}' anywhere:** {len(matching)}")
             if matching:
-                st.write(f"🔍 **Matching bucket examples:**")
+                st.write("🔍 **Matching bucket examples:**")
                 for bid in matching[:10]:
                     st.text(f"  - {bid}")
 
@@ -643,21 +647,24 @@ class KeboolaAPIClient:
 
     # ==================== Job Management ====================
 
-    def run_component(self, component_id: str, config_id: str, branch_id: Optional[str] = None) -> Dict[str, Any]:
+    def run_component(
+        self, component_id: str, config_id: str, branch_id: Optional[str] = None, mode: str = "run"
+    ) -> Dict[str, Any]:
         """
-        Trigger a component run in debug mode.
+        Trigger a component run.
 
         Args:
             component_id: Component ID
             config_id: Configuration ID
             branch_id: Branch ID (None for default branch)
+            mode: Job mode - "run" (default) or "debug"
 
         Returns:
             Job information dictionary with job ID
         """
         url = f"{self.queue_url}/jobs"
 
-        payload = {"mode": "debug", "component": component_id, "config": config_id}
+        payload = {"mode": mode, "component": component_id, "config": config_id}
 
         if branch_id:
             payload["branchId"] = str(branch_id)
@@ -750,16 +757,52 @@ class KeboolaAPIClient:
 
     # ==================== Data Queries ====================
 
+    @st.cache_data(ttl=3600)
+    def get_default_branch_id(_self) -> str:
+        """
+        Get the numeric ID of the default (Main) branch.
+
+        Returns:
+            Numeric branch ID as string
+        """
+        # List all dev branches and find the "Main" branch
+        url = f"{_self.storage_url}/v2/storage/dev-branches"
+        response = requests.get(url, headers=_self.headers)
+        response.raise_for_status()
+
+        branches = response.json()
+
+        # Find the Main branch (isDefault=True or name="Main")
+        for branch in branches:
+            if branch.get("isDefault", False) or branch.get("name") == "Main":
+                return str(branch["id"])
+
+        raise ValueError("Could not find Main/default branch in dev-branches list")
+
+    def _resolve_branch_id(self, branch_id: Optional[str]) -> str:
+        """
+        Resolve branch ID to numeric ID. Query Service requires numeric IDs, not 'default'.
+
+        Args:
+            branch_id: Branch ID (None or string) - can be numeric ID or None for default
+
+        Returns:
+            Numeric branch ID as string
+        """
+        if branch_id is None:
+            return self.get_default_branch_id()
+        return str(branch_id)
+
     @st.cache_data(ttl=300)
     def query_table_data(
         _self, table_id: str, branch_id: Optional[str] = None, limit: Optional[int] = None
     ) -> pd.DataFrame:
         """
-        Query table data via Workspace API.
+        Query table data via Keboola Query Service API (async job-based).
 
         Args:
             table_id: Full table ID without branch prefix (e.g., "in.c-bucket.table")
-            branch_id: Branch ID (None for default branch) - can be int or str
+            branch_id: Branch ID (None for default branch) - must be numeric
             limit: Maximum number of rows to fetch
 
         Returns:
@@ -768,16 +811,12 @@ class KeboolaAPIClient:
         if not _self.workspace_id:
             raise ValueError("KBC_WORKSPACE_ID must be configured for data queries")
 
-        # CRITICAL FIX: Convert branch_id to string if provided
-        if branch_id is not None:
-            branch_id = str(branch_id)
+        # Resolve to numeric branch ID (Query Service requires numeric, not "default")
+        numeric_branch_id = _self._resolve_branch_id(branch_id)
 
-        url = f"{_self.storage_url}/v2/storage/workspaces/{_self.workspace_id}/query"
-
-        # Add branch ID to table_id if in dev branch
+        # For dev branches, table IDs are prefixed with branch ID
         # Pattern: "in.c-bucket.table" -> "in.c-20533-bucket.table"
-        if branch_id:
-            # Split: "in.c-bucket.table" -> ["in", "c-bucket", "table"]
+        if branch_id is not None:
             parts = table_id.split(".")
             if len(parts) == 3 and parts[1].startswith("c-"):
                 stage = parts[0]  # "in" or "out"
@@ -785,16 +824,19 @@ class KeboolaAPIClient:
                 table_name = parts[2]  # "table"
                 full_table_id = f"{stage}.c-{branch_id}-{bucket_name}.{table_name}"
             else:
-                # Fallback
                 full_table_id = f"{branch_id}-{table_id}"
         else:
             full_table_id = table_id
 
-        # Build SQL query with prefixed table ID
+        # Build SQL query with fully qualified table name
+        # Keboola table ID format: "stage.c-bucket.table" (e.g., "in.c-mybucket.mytable")
+        # In Snowflake: schema = "stage.c-bucket", table = "table"
+        # So qualified name = "in.c-mybucket"."mytable"
         parts = full_table_id.split(".")
         if len(parts) == 3:
-            bucket, table = parts[1], parts[2]
-            qualified_name = f'"{parts[0]}"."{bucket}"."{table}"'
+            schema = f"{parts[0]}.{parts[1]}"  # e.g., "in.c-mybucket"
+            table = parts[2]  # e.g., "mytable"
+            qualified_name = f'"{schema}"."{table}"'
         else:
             qualified_name = f'"{full_table_id}"'
 
@@ -802,27 +844,98 @@ class KeboolaAPIClient:
         if limit:
             query += f" LIMIT {limit}"
 
-        headers = _self.headers.copy()
-        headers["Content-Type"] = "application/json"
+        # Execute query via Query Service
+        return _self._execute_query_service_query(query, numeric_branch_id)
 
-        response = requests.post(url, headers=headers, json={"query": query})
-        response.raise_for_status()
-
-        result = response.json()
-
-        # Convert to DataFrame
-        if "rows" in result:
-            df = pd.DataFrame(result["rows"], columns=result.get("columns", []))
-            return df
-        else:
-            return pd.DataFrame()
-
-    def execute_query(_self, query: str, return_dataframe: bool = True):
+    def _execute_query_service_query(_self, query: str, numeric_branch_id: str) -> pd.DataFrame:
         """
-        Execute a custom SQL query via Workspace API.
+        Execute a query via Keboola Query Service (async job-based API).
 
         Args:
             query: SQL query to execute
+            numeric_branch_id: Numeric branch ID (NOT "default")
+
+        Returns:
+            DataFrame with query results
+        """
+        headers = _self.headers.copy()
+        headers["Content-Type"] = "application/json"
+        headers["Accept"] = "application/json"
+
+        # Step 1: Submit query job
+        # POST /api/v1/branches/{branchId}/workspaces/{workspaceId}/queries
+        submit_url = (
+            f"{_self.query_service_url}/api/v1/branches/{numeric_branch_id}"
+            f"/workspaces/{_self.workspace_id}/queries"
+        )
+
+        payload = {"statements": [query]}
+
+        response = requests.post(submit_url, headers=headers, json=payload)
+        response.raise_for_status()
+
+        job_data = response.json()
+        query_job_id = job_data.get("queryJobId")
+
+        if not query_job_id:
+            raise ValueError(f"Query Service did not return a queryJobId: {job_data}")
+
+        # Step 2: Poll for job completion
+        # GET /api/v1/queries/{queryJobId}
+        status_url = f"{_self.query_service_url}/api/v1/queries/{query_job_id}"
+
+        max_attempts = 60  # 60 * 2 seconds = 2 minutes timeout
+        status_data = None
+        for _ in range(max_attempts):
+            status_response = requests.get(status_url, headers=headers)
+            status_response.raise_for_status()
+
+            status_data = status_response.json()
+            status = status_data.get("status")
+
+            if status == "completed":
+                break
+            elif status in ["failed", "cancelled", "canceled"]:
+                error_msg = status_data.get("error", {}).get("message", "Unknown error")
+                raise ValueError(f"Query job failed: {error_msg}")
+            elif status in ["created", "enqueued", "processing"]:
+                time.sleep(2)
+            else:
+                # Unknown status, wait and retry
+                time.sleep(2)
+        else:
+            raise TimeoutError(f"Query job {query_job_id} did not complete within timeout")
+
+        # Step 3: Get results
+        # GET /api/v1/queries/{queryJobId}/{statementId}/results
+        statements = status_data.get("statements", [])
+        if not statements:
+            return pd.DataFrame()
+
+        statement_id = statements[0].get("id", 0)
+        results_url = f"{_self.query_service_url}/api/v1/queries/{query_job_id}/{statement_id}/results"
+
+        results_response = requests.get(results_url, headers=headers)
+        results_response.raise_for_status()
+
+        result_data = results_response.json()
+
+        # Parse results into DataFrame
+        columns = [col.get("name", f"col_{i}") for i, col in enumerate(result_data.get("columns", []))]
+        rows = result_data.get("rows", [])
+
+        if rows and columns:
+            return pd.DataFrame(rows, columns=columns)
+
+        return pd.DataFrame()
+
+    def execute_query(_self, query: str, branch_id: Optional[str] = None, return_dataframe: bool = True):
+        """
+        Execute a custom SQL query via Keboola Query Service API.
+
+        Args:
+            query: SQL query to execute
+            branch_id: Branch ID (None for default branch)
             return_dataframe: If True, returns DataFrame; if False, returns raw result dict
 
         Returns:
@@ -831,24 +944,14 @@ class KeboolaAPIClient:
         if not _self.workspace_id:
             raise ValueError("KBC_WORKSPACE_ID must be configured for queries")
 
-        url = f"{_self.storage_url}/v2/storage/workspaces/{_self.workspace_id}/query"
-
-        headers = _self.headers.copy()
-        headers["Content-Type"] = "application/json"
-
-        response = requests.post(url, headers=headers, json={"query": query})
-        response.raise_for_status()
-
-        result = response.json()
+        # Resolve to numeric branch ID
+        numeric_branch_id = _self._resolve_branch_id(branch_id)
 
         if return_dataframe:
-            if "rows" in result:
-                df = pd.DataFrame(result["rows"], columns=result.get("columns", []))
-                return df
-            else:
-                return pd.DataFrame()
+            return _self._execute_query_service_query(query, numeric_branch_id)
         else:
-            return result
+            df = _self._execute_query_service_query(query, numeric_branch_id)
+            return {"columns": df.columns.tolist(), "rows": df.values.tolist()}
 
     def get_table_data_preview(self, table_id: str, branch_id: Optional[str] = None, limit: int = 100) -> pd.DataFrame:
         """
@@ -951,7 +1054,7 @@ class KeboolaAPIClient:
             branch_id: Branch ID (None for default branch)
 
         Returns:
-            Qualified table name for SQL queries (e.g., "in"."c-20533-bucket"."table")
+            Qualified table name for SQL queries (e.g., "in.c-20533-bucket"."table")
         """
         # CRITICAL FIX: Convert branch_id to string if provided
         if branch_id is not None:
@@ -971,9 +1074,12 @@ class KeboolaAPIClient:
         else:
             full_table_id = table_id
 
-        # Build qualified name
+        # Build qualified name: "schema"."table"
+        # Keboola table ID format: "stage.c-bucket.table" -> schema = "stage.c-bucket", table = "table"
         parts = full_table_id.split(".")
         if len(parts) == 3:
-            return f'"{parts[0]}"."{parts[1]}"."{parts[2]}"'
+            schema = f"{parts[0]}.{parts[1]}"  # e.g., "in.c-mybucket"
+            table = parts[2]  # e.g., "mytable"
+            return f'"{schema}"."{table}"'
         else:
             return f'"{full_table_id}"'
