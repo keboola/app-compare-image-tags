@@ -559,12 +559,27 @@ class ComparisonEngine:
                 try:
                     # Use data-preview endpoint which doesn't require workspace credentials
                     preview_limit = min(row_limit, 1000)  # data-preview typically limits to 1000 rows
+
+                    # Check for truncation and warn user
+                    prod_row_count = meta.get("row_count", {}).get("production", 0)
+                    test_row_count = meta.get("row_count", {}).get("test", 0)
+                    actual_count = max(prod_row_count, test_row_count)
+                    if preview_limit < actual_count:
+                        st.warning(
+                            f"⚠️ Data preview limited to {preview_limit:,} rows for `{table_id}`. "
+                            f"Full comparison not possible without workspace (table has {actual_count:,} rows)."
+                        )
+
                     prod_data = self.client.get_table_data_preview(table_id, prod_branch, limit=preview_limit)
                     test_data = self.client.get_table_data_preview(table_id, test_branch, limit=preview_limit)
 
                     comparison = self._detailed_dataframe_comparison(
                         prod_data, test_data, meta["primary_keys"]["production"]
                     )
+
+                    # Add truncation warning to result if applicable
+                    if preview_limit < actual_count:
+                        comparison["truncation_warning"] = f"Compared {preview_limit:,} of {actual_count:,} rows"
 
                     results[table_id] = comparison
 
@@ -1466,12 +1481,29 @@ class ComparisonEngine:
                 try:
                     # Fallback to pandas using data-preview (no workspace required)
                     # Note: limit is usually small (100) for preview, but let's try 1000 if API allows
-                    prod_data = self.client.get_table_data_preview(table_id_1, branch_id=None, limit=1000)
-                    test_data = self.client.get_table_data_preview(table_id_2, branch_id=None, limit=1000)
+                    preview_limit = 1000
+
+                    # Check for truncation and warn user
+                    prod_row_count = meta.get("row_count", {}).get("production", 0)
+                    test_row_count = meta.get("row_count", {}).get("test", 0)
+                    actual_count = max(prod_row_count, test_row_count)
+                    if preview_limit < actual_count:
+                        st.warning(
+                            f"⚠️ Data preview limited to {preview_limit:,} rows. "
+                            f"Full comparison not possible without workspace (tables have up to {actual_count:,} rows)."
+                        )
+
+                    prod_data = self.client.get_table_data_preview(table_id_1, branch_id=None, limit=preview_limit)
+                    test_data = self.client.get_table_data_preview(table_id_2, branch_id=None, limit=preview_limit)
 
                     pks = meta["primary_keys"]["production"]
 
                     comparison = self._detailed_dataframe_comparison(prod_data, test_data, pks)
+
+                    # Add truncation warning to result if applicable
+                    if preview_limit < actual_count:
+                        comparison["truncation_warning"] = f"Compared {preview_limit:,} of {actual_count:,} rows"
+
                     results["row_differences"] = {virtual_id: comparison}
 
                     if comparison.get("status") == "match":
