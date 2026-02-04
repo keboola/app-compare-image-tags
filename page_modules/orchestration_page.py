@@ -880,12 +880,18 @@ def direct_comparison_page(client: KeboolaAPIClient):
                         st.error("❌ Need exactly two tables to compare")
                         return
                 elif comparison_mode == "buckets":
-                    # Direct bucket comparison
-                    results = engine.compare_specific_buckets(
-                        production_branch=prod_branch_id,
-                        test_branch_id=test_branch_id,
-                        bucket_ids=st.session_state["bucket_ids_to_compare"],
-                    )
+                    # Check for new bucket_pairs format (URL-based)
+                    bucket_pairs = st.session_state.get("bucket_pairs")
+                    if bucket_pairs:
+                        add_log("comparison", f"Using URL-based bucket comparison with {len(bucket_pairs)} pair(s)")
+                        results = engine.compare_bucket_pairs(bucket_pairs=bucket_pairs)
+                    else:
+                        # Fallback to legacy format
+                        results = engine.compare_specific_buckets(
+                            production_branch=prod_branch_id,
+                            test_branch_id=test_branch_id,
+                            bucket_ids=st.session_state.get("bucket_ids_to_compare", []),
+                        )
 
                 st.session_state.comparison_results = results
                 add_log("comparison", "Comparison completed successfully!", "success")

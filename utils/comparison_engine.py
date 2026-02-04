@@ -15,6 +15,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
+import requests
 import streamlit as st
 
 from .keboola_client import KeboolaAPIClient
@@ -43,6 +44,31 @@ def _sanitize_sql_identifier(name: str) -> str:
 def _validate_table_id(table_id: str) -> bool:
     """Validate table ID format."""
     return bool(re.match(r"^(in|out)\.c-[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+$", table_id))
+
+
+def _normalize_bucket_id(bucket_id: str) -> str:
+    """
+    Normalize a bucket ID by stripping any embedded branch ID.
+
+    Bucket IDs from dev branches have the format: {stage}.c-{branch_id}-{bucket_name}
+    This function returns the canonical form: {stage}.c-{bucket_name}
+
+    Args:
+        bucket_id: Bucket ID that may contain an embedded branch ID
+
+    Returns:
+        Canonical bucket ID without branch ID prefix
+    """
+    # Pattern: in.c-{numeric_branch_id}-{rest} or out.c-{numeric_branch_id}-{rest}
+    # Example: in.c-27406-keboola-ex-instagram -> in.c-keboola-ex-instagram
+    match = re.match(r"^(in|out)\.c-(\d+)-(.+)$", bucket_id)
+    if match:
+        stage = match.group(1)
+        # branch_id = match.group(2)  # Not needed, we're stripping it
+        bucket_name = match.group(3)
+        return f"{stage}.c-{bucket_name}"
+    # Already canonical or unexpected format - return as-is
+    return bucket_id
 
 
 class ComparisonEngine:
@@ -1504,18 +1530,31 @@ class ComparisonEngine:
         Args:
             production_branch: Production branch ID (None for default branch)
             test_branch_id: Test branch ID
-            bucket_ids: List of bucket IDs to compare
+            bucket_ids: List of bucket IDs to compare (may contain embedded branch IDs)
 
         Returns:
             Comparison results dictionary
         """
+        # Normalize bucket IDs to strip any embedded branch IDs
+        # Users may enter bucket IDs copied from Keboola UI which include branch IDs
+        # e.g., "in.c-27406-mybucket" -> "in.c-mybucket"
+        normalized_bucket_ids = [_normalize_bucket_id(bid) for bid in bucket_ids]
+
         st.markdown("## 🔍 Starting Bucket-Specific Comparison")
         st.info(f"""
         **Comparing:**
         - 🔵 Production Branch ID: `{production_branch}`
         - 🟢 Test Branch ID: `{test_branch_id}`
-        - 🗂️ Buckets: {len(bucket_ids)}
+        - 🗂️ Buckets: {len(normalized_bucket_ids)}
         """)
+
+        # Show normalization info if any bucket IDs were modified
+        if normalized_bucket_ids != bucket_ids:
+            with st.expander("ℹ️ Bucket ID Normalization", expanded=False):
+                st.write("Bucket IDs were normalized to remove embedded branch IDs:")
+                for orig, norm in zip(bucket_ids, normalized_bucket_ids):
+                    if orig != norm:
+                        st.text(f"  {orig} → {norm}")
 
         results = {}
 
@@ -1525,17 +1564,17 @@ class ComparisonEngine:
         results["bucket_comparison"] = {
             "production_only": [],
             "test_only": [],
-            "common": bucket_ids,  # We're explicitly comparing these buckets
+            "common": normalized_bucket_ids,  # We're explicitly comparing these buckets
             "status": ComparisonStatus.MATCH,
             "_mode": "buckets",
         }
-        st.success(f"✅ Comparing {len(bucket_ids)} specified bucket(s)")
+        st.success(f"✅ Comparing {len(normalized_bucket_ids)} specified bucket(s)")
 
         # Level 2: Table comparison within specified buckets
         st.markdown("---")
         st.markdown("## Step 2: Table Comparison")
         results["table_comparison"] = {}
-        for bucket_id in bucket_ids:
+        for bucket_id in normalized_bucket_ids:
             st.markdown(f"#### Bucket: `{bucket_id}`")
 
             try:
@@ -1593,6 +1632,359 @@ class ComparisonEngine:
         st.success("✅ Comparison complete!")
 
         return results
+
+    def compare_bucket_pairs(self, bucket_pairs: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Compare buckets using pre-parsed URL information.
+
+        Each bucket pair contains bucket_a and bucket_b with:
+        - branch_id: Branch ID (None for production)
+        - bucket_id: Full bucket ID as it appears in the API
+        - canonical_bucket_id: Display name without branch prefix
+
+        Args:
+            bucket_pairs: List of bucket pair dictionaries from parse_bucket_url
+
+        Returns:
+            Comparison results dictionary
+        """
+        st.markdown("## 🔍 Starting Bucket Comparison")
+
+        # Display what we're comparing
+        for idx, pair in enumerate(bucket_pairs):
+            bucket_a = pair["bucket_a"]
+            bucket_b = pair["bucket_b"]
+            branch_a = f"Branch {bucket_a['branch_id']}" if bucket_a["branch_id"] else "Production"
+            branch_b = f"Branch {bucket_b['branch_id']}" if bucket_b["branch_id"] else "Production"
+
+            st.info(f"""
+            **Pair {idx + 1}:**
+            - 🔵 {branch_a}: `{bucket_a['canonical_bucket_id']}`
+            - 🟢 {branch_b}: `{bucket_b['canonical_bucket_id']}`
+            """)
+
+        results = {
+            "bucket_comparison": {
+                "production_only": [],
+                "test_only": [],
+                "common": [p["bucket_a"]["canonical_bucket_id"] for p in bucket_pairs],
+                "status": ComparisonStatus.MATCH,
+                "_mode": "bucket_pairs",
+            },
+            "table_comparison": {},
+            "metadata_comparison": {},
+            "row_differences": {},
+        }
+
+        # Process each bucket pair
+        st.markdown("---")
+        st.markdown("## Step 1: Table Comparison")
+
+        all_table_pairs = []  # Collect table pairs for metadata/row comparison
+
+        for pair_idx, pair in enumerate(bucket_pairs):
+            bucket_a = pair["bucket_a"]
+            bucket_b = pair["bucket_b"]
+
+            pair_key = bucket_a["canonical_bucket_id"]
+            st.markdown(f"### Pair {pair_idx + 1}: `{pair_key}`")
+
+            try:
+                # List tables using the full bucket IDs directly (no transformation needed)
+                # The bucket_id from URL is exactly what the API expects
+                tables_a = set(self._list_tables_direct(bucket_a["bucket_id"]))
+                tables_b = set(self._list_tables_direct(bucket_b["bucket_id"]))
+
+                common = sorted(tables_a & tables_b)
+                a_only = sorted(tables_a - tables_b)
+                b_only = sorted(tables_b - tables_a)
+
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Common Tables", len(common))
+                with col2:
+                    st.metric("Bucket A Only", len(a_only))
+                with col3:
+                    st.metric("Bucket B Only", len(b_only))
+
+                results["table_comparison"][pair_key] = {
+                    "production_only": a_only,
+                    "test_only": b_only,
+                    "common": common,
+                    "status": ComparisonStatus.MATCH if tables_a == tables_b else ComparisonStatus.DIFFER,
+                }
+
+                # Collect table pairs for subsequent comparison
+                for table_name in common:
+                    all_table_pairs.append({
+                        "table_name": table_name,
+                        "table_a_id": f"{bucket_a['bucket_id']}.{table_name}",
+                        "table_b_id": f"{bucket_b['bucket_id']}.{table_name}",
+                        "branch_a": bucket_a["branch_id"],
+                        "branch_b": bucket_b["branch_id"],
+                        "display_key": f"{pair_key}.{table_name}",
+                    })
+
+            except Exception as e:
+                st.error(f"❌ Error comparing tables in pair {pair_idx + 1}: {str(e)}")
+                results["table_comparison"][pair_key] = {
+                    "production_only": [],
+                    "test_only": [],
+                    "common": [],
+                    "status": ComparisonStatus.ERROR,
+                    "error": str(e),
+                }
+
+        # Step 2: Metadata comparison for all table pairs
+        st.markdown("---")
+        st.markdown("## Step 2: Metadata Comparison")
+
+        if not all_table_pairs:
+            st.warning("⚠️ No common tables to compare metadata")
+        else:
+            st.info(f"Comparing metadata for {len(all_table_pairs)} common table(s)...")
+            results["metadata_comparison"] = self._compare_table_pairs_metadata(all_table_pairs)
+
+        # Step 3: Row-level comparison
+        st.markdown("---")
+        st.markdown("## Step 3: Row-Level Data Comparison")
+
+        if not results["metadata_comparison"]:
+            st.warning("⚠️ No tables to compare at row level")
+        else:
+            results["row_differences"] = self._compare_table_pairs_rows(
+                all_table_pairs, results["metadata_comparison"]
+            )
+
+        # Generate summary
+        st.markdown("---")
+        st.markdown("## 📊 Generating Summary")
+        results["summary"] = self._generate_summary(results)
+
+        st.markdown("---")
+        st.success("✅ Comparison complete!")
+
+        return results
+
+    def _list_tables_direct(self, full_bucket_id: str) -> List[str]:
+        """
+        List tables in a bucket using the full bucket ID directly.
+
+        Args:
+            full_bucket_id: Full bucket ID as it appears in the API (e.g., in.c-27405-mybucket)
+
+        Returns:
+            List of table names
+        """
+        url = f"{self.client.storage_url}/v2/storage/buckets/{full_bucket_id}"
+        response = requests.get(url, headers=self.client.headers)
+        response.raise_for_status()
+        bucket = response.json()
+        return [table["name"] for table in bucket.get("tables", [])]
+
+    def _compare_table_pairs_metadata(self, table_pairs: List[Dict]) -> Dict[str, Any]:
+        """
+        Compare metadata for table pairs.
+
+        Args:
+            table_pairs: List of table pair info dicts
+
+        Returns:
+            Metadata comparison results keyed by display_key
+        """
+        results = {}
+
+        for pair in table_pairs:
+            display_key = pair["display_key"]
+            try:
+                # Get metadata for both tables directly
+                meta_a = self._get_table_metadata_direct(pair["table_a_id"])
+                meta_b = self._get_table_metadata_direct(pair["table_b_id"])
+
+                pk_comparison = self._compare_primary_keys(meta_a, meta_b)
+                col_comparison = self._compare_columns(meta_a, meta_b)
+                type_comparison = self._compare_data_types(meta_a, meta_b)
+                count_comparison = self._compare_row_counts(meta_a, meta_b)
+
+                all_match = (
+                    pk_comparison["match"]
+                    and col_comparison["match"]
+                    and type_comparison["match"]
+                    and count_comparison["match"]
+                )
+
+                results[display_key] = {
+                    "primary_keys": pk_comparison,
+                    "columns": col_comparison,
+                    "data_types": type_comparison,
+                    "row_count": count_comparison,
+                    "status": ComparisonStatus.MATCH if all_match else ComparisonStatus.DIFFER,
+                    "_table_pair": pair,  # Store pair info for row comparison
+                }
+
+                if all_match:
+                    st.success(f"✅ Table `{display_key}`: All metadata matches")
+                else:
+                    st.warning(f"⚠️ Table `{display_key}`: Metadata differences found")
+
+            except Exception as e:
+                st.error(f"❌ Error comparing metadata for `{display_key}`: {str(e)}")
+                results[display_key] = {
+                    "status": ComparisonStatus.ERROR,
+                    "error": str(e),
+                    "_table_pair": pair,
+                }
+
+        return results
+
+    def _get_table_metadata_direct(self, full_table_id: str) -> Dict[str, Any]:
+        """
+        Get table metadata using the full table ID directly.
+
+        Args:
+            full_table_id: Full table ID (e.g., in.c-27405-mybucket.mytable)
+
+        Returns:
+            Table metadata dictionary
+        """
+        url = f"{self.client.storage_url}/v2/storage/tables/{full_table_id}"
+        response = requests.get(url, headers=self.client.headers)
+        response.raise_for_status()
+        return response.json()
+
+    def _compare_table_pairs_rows(
+        self, table_pairs: List[Dict], metadata_comparison: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Compare row data for table pairs.
+
+        Args:
+            table_pairs: List of table pair info dicts
+            metadata_comparison: Metadata comparison results
+
+        Returns:
+            Row comparison results
+        """
+        results = {}
+
+        for pair in table_pairs:
+            display_key = pair["display_key"]
+            meta = metadata_comparison.get(display_key, {})
+
+            # Skip if metadata error
+            if meta.get("status") == ComparisonStatus.ERROR:
+                results[display_key] = {
+                    "status": ComparisonStatus.SKIPPED,
+                    "reason": f"Metadata error: {meta.get('error')}",
+                }
+                continue
+
+            # Skip if critical metadata doesn't match
+            if (
+                not meta.get("primary_keys", {}).get("match", True)
+                or not meta.get("columns", {}).get("match", True)
+                or not meta.get("data_types", {}).get("match", True)
+            ):
+                mismatch_reasons = []
+                if not meta.get("primary_keys", {}).get("match", True):
+                    mismatch_reasons.append("primary keys")
+                if not meta.get("columns", {}).get("match", True):
+                    mismatch_reasons.append("columns")
+                if not meta.get("data_types", {}).get("match", True):
+                    mismatch_reasons.append("data types")
+
+                results[display_key] = {
+                    "status": ComparisonStatus.SKIPPED,
+                    "reason": f"Metadata mismatch: {', '.join(mismatch_reasons)}",
+                }
+                st.info(f"ℹ️ Skipping row comparison for `{display_key}`: metadata differs")
+                continue
+
+            # Try SQL comparison
+            try:
+                comparison = self._compare_tables_direct_sql(
+                    pair["table_a_id"],
+                    pair["table_b_id"],
+                    meta["columns"]["common"],
+                    meta["primary_keys"]["production"],
+                )
+                results[display_key] = comparison
+
+                if comparison["status"] == ComparisonStatus.MATCH:
+                    st.success(f"✅ Table `{display_key}`: Perfect match ({comparison.get('production_row_count', 0):,} rows)")
+                else:
+                    st.warning(f"⚠️ Table `{display_key}`: Found {comparison.get('differing_rows', 0):,} difference(s)")
+
+            except Exception as e:
+                st.warning(f"⚠️ SQL comparison failed for `{display_key}`: {str(e)}")
+                results[display_key] = {
+                    "status": ComparisonStatus.ERROR,
+                    "error": str(e),
+                }
+
+        return results
+
+    def _compare_tables_direct_sql(
+        self,
+        table_a_id: str,
+        table_b_id: str,
+        columns: List[str],
+        primary_keys: List[str],
+    ) -> Dict[str, Any]:
+        """
+        Compare two tables using direct SQL with full table IDs.
+
+        Args:
+            table_a_id: Full table A ID
+            table_b_id: Full table B ID
+            columns: Common columns to compare
+            primary_keys: Primary key columns
+
+        Returns:
+            Comparison results
+        """
+        row_limit = st.session_state.get("comparison_row_limit", self.DEFAULT_ROW_LIMIT)
+        row_limit = max(1, min(int(row_limit), self.MAX_ROW_LIMIT))
+
+        # Build qualified names from full table IDs
+        def to_qualified(table_id: str) -> str:
+            parts = table_id.split(".")
+            if len(parts) == 3:
+                schema = f"{parts[0]}.{parts[1]}"
+                table = parts[2]
+                return f'"{schema}"."{table}"'
+            return f'"{table_id}"'
+
+        table_a_qualified = to_qualified(table_a_id)
+        table_b_qualified = to_qualified(table_b_id)
+
+        column_list = ", ".join([_sanitize_sql_identifier(col) for col in sorted(columns)])
+
+        queries = [
+            f"SELECT {column_list} FROM {table_a_qualified} EXCEPT SELECT {column_list} FROM {table_b_qualified} LIMIT {row_limit}",
+            f"SELECT {column_list} FROM {table_b_qualified} EXCEPT SELECT {column_list} FROM {table_a_qualified} LIMIT {row_limit}",
+            f"SELECT COUNT(*) as count FROM {table_a_qualified}",
+            f"SELECT COUNT(*) as count FROM {table_b_qualified}",
+        ]
+
+        results_list = self.client.execute_queries_batch(queries)
+
+        a_only_df = results_list[0]
+        b_only_df = results_list[1]
+        a_count = results_list[2].iloc[0, 0] if not results_list[2].empty else 0
+        b_count = results_list[3].iloc[0, 0] if not results_list[3].empty else 0
+
+        total_differences = len(a_only_df) + len(b_only_df)
+
+        return {
+            "status": ComparisonStatus.MATCH if total_differences == 0 and a_count == b_count else ComparisonStatus.DIFFER,
+            "production_row_count": a_count,
+            "test_row_count": b_count,
+            "differing_rows": total_differences,
+            "rows_only_in_production": len(a_only_df),
+            "rows_only_in_test": len(b_only_df),
+            "comparison_method": "sql_direct",
+        }
 
     def compare_two_tables(self, table_id_1: str, table_id_2: str) -> Dict[str, Any]:
         """

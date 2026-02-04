@@ -9,7 +9,7 @@ This page allows users to choose between three comparison modes:
 
 import streamlit as st
 
-from utils.keboola_client import KeboolaAPIClient, parse_workspace_url, validate_workspace
+from utils.keboola_client import KeboolaAPIClient, parse_bucket_url, parse_workspace_url, validate_workspace
 
 
 def create_input_page():
@@ -95,15 +95,33 @@ def display_validated_input():
 
     elif mode == "buckets":
         st.success("✅ Bucket Comparison Mode")
-        st.info(f"**Production Branch:** {st.session_state['production_branch_name']}")
-        st.info(f"**Test Branch:** {st.session_state['test_branch_name']}")
-        st.info(f"**Buckets to Compare:** {len(st.session_state['bucket_ids_to_compare'])}")
-        st.info(f"**Comparison Mode:** {comparison_mode_label}")
-        if not workspace_id:
-            st.info(f"**Row Limit:** {row_limit:,}")
-        with st.expander("View bucket list"):
-            for bucket_id in st.session_state["bucket_ids_to_compare"]:
-                st.text(f"  • {bucket_id}")
+        bucket_pairs = st.session_state.get("bucket_pairs", [])
+        if bucket_pairs:
+            st.info(f"**Bucket Pairs:** {len(bucket_pairs)}")
+            st.info(f"**Comparison Mode:** {comparison_mode_label}")
+            if not workspace_id:
+                st.info(f"**Row Limit:** {row_limit:,}")
+            with st.expander("View bucket pairs"):
+                for idx, pair in enumerate(bucket_pairs):
+                    bucket_a = pair["bucket_a"]
+                    bucket_b = pair["bucket_b"]
+                    branch_a = f"Branch {bucket_a['branch_id']}" if bucket_a["branch_id"] else "Production"
+                    branch_b = f"Branch {bucket_b['branch_id']}" if bucket_b["branch_id"] else "Production"
+                    st.markdown(f"**Pair {idx + 1}:**")
+                    st.text(f"  🔵 {branch_a}: {bucket_a['canonical_bucket_id']}")
+                    st.text(f"  🟢 {branch_b}: {bucket_b['canonical_bucket_id']}")
+        else:
+            # Legacy format fallback
+            st.info(f"**Production Branch:** {st.session_state.get('production_branch_name', 'N/A')}")
+            st.info(f"**Test Branch:** {st.session_state.get('test_branch_name', 'N/A')}")
+            bucket_ids = st.session_state.get("bucket_ids_to_compare", [])
+            st.info(f"**Buckets to Compare:** {len(bucket_ids)}")
+            st.info(f"**Comparison Mode:** {comparison_mode_label}")
+            if not workspace_id:
+                st.info(f"**Row Limit:** {row_limit:,}")
+            with st.expander("View bucket list"):
+                for bucket_id in bucket_ids:
+                    st.text(f"  • {bucket_id}")
 
     if st.button("🔄 Change Input"):
         # Clear current input and allow re-entry
@@ -129,6 +147,8 @@ def clear_input_session_state():
         # "table_id_1",            <-- KEEP
         # "table_id_2",            <-- KEEP
         "bucket_ids_to_compare",
+        "bucket_pairs",
+        # "bucket_urls_input",     <-- KEEP
         # "production_branch_name", <-- KEEP
         # "test_branch_name",       <-- KEEP
         "production_branch_id",
@@ -366,20 +386,27 @@ def create_table_comparison_form():
 
 
 def create_bucket_comparison_form():
-    """Create form for bucket comparison mode."""
+    """Create form for bucket comparison mode using bucket URLs."""
     show_advanced = st.session_state.get("show_advanced", False)
 
-    st.markdown("### Compare All Tables in Specific Buckets")
-    st.caption("Compare all tables within selected buckets between two branches.")
+    st.markdown("### Compare Buckets Using URLs")
+    st.caption("Compare buckets by pasting their URLs directly from Keboola.")
     with st.expander("How this works", expanded=show_advanced):
         st.markdown("""
-        Provide bucket IDs (one per line) in the format: `stage.c-bucket-name`
+        **Paste bucket URLs directly from Keboola** (one per line).
 
-        **Example:**
-        ```
-        in.c-my-source-data
-        out.c-my-results
-        ```
+        The URL contains all the information needed: connection, branch, and bucket ID.
+
+        **Examples:**
+        - Production bucket:
+          `https://connection.us-east4.gcp.keboola.com/admin/projects/4214/storage/in.c-mybucket/overview`
+        - Dev branch bucket:
+          `https://connection.us-east4.gcp.keboola.com/admin/projects/4214/branch/27405/storage/in.c-27405-mybucket/overview`
+
+        **Comparison pairs:** URLs are compared in pairs (1st with 2nd, 3rd with 4th, etc.)
+        - Enter 2 URLs to compare one bucket pair
+        - Enter 4 URLs to compare two bucket pairs
+        - And so on...
         """)
 
     with st.form("bucket_input_form"):
@@ -390,14 +417,6 @@ def create_bucket_comparison_form():
             key="user_token_buckets",
             help="Your Keboola admin token",
             placeholder="Enter your admin token here",
-        )
-
-        kbc_url = st.text_input(
-            "Keboola Connection URL",
-            value=st.session_state.get("kbc_url", ""),
-            key="kbc_url_buckets",
-            help="Your Keboola connection URL (e.g., https://connection.keboola.com)",
-            placeholder="e.g., https://connection.keboola.com",
         )
 
         workspace_url = st.text_input(
@@ -412,32 +431,12 @@ def create_bucket_comparison_form():
             placeholder="e.g., https://connection.keboola.com/admin/projects/12345/workspaces/01kg4cky9chn32aqaxq7ejnrzj",
         )
 
-        col1, col2 = st.columns(2)
-
-        with col1:
-            production_branch = st.text_input(
-                "Production Branch Name/ID",
-                value=st.session_state.get("production_branch_name", "default"),
-                key="widget_production_branch_name",
-                help="Branch name or ID for production data (use 'default' for main branch)",
-                placeholder="e.g., default or main-branch",
-            )
-
-        with col2:
-            test_branch = st.text_input(
-                "Test Branch Name/ID",
-                value=st.session_state.get("test_branch_name", ""),
-                key="widget_test_branch_name",
-                help="Branch name or ID for test data",
-                placeholder="e.g., dev-branch or 12345",
-            )
-
-        bucket_ids_input = st.text_area(
-            "Bucket IDs to Compare (one per line)",
-            value=st.session_state.get("bucket_ids_input", ""),
-            key="widget_bucket_ids_input",
-            help="Enter bucket IDs in format: stage.c-bucket-name",
-            placeholder="in.c-my-source-data\nout.c-my-results",
+        bucket_urls_input = st.text_area(
+            "Bucket URLs to Compare (one per line, in pairs)",
+            value=st.session_state.get("bucket_urls_input", ""),
+            key="widget_bucket_urls_input",
+            help="Paste bucket URLs from Keboola. URLs are compared in pairs (1st vs 2nd, 3rd vs 4th, etc.)",
+            placeholder="https://connection.../admin/projects/123/storage/in.c-mybucket/overview\nhttps://connection.../admin/projects/123/branch/456/storage/in.c-456-mybucket/overview",
             height=150,
         )
 
@@ -456,26 +455,22 @@ def create_bucket_comparison_form():
             st.error("❌ Please provide your Keboola Admin Token")
             return
 
-        if not kbc_url:
-            st.error("❌ Please provide Keboola Connection URL")
+        if not bucket_urls_input.strip():
+            st.error("❌ Please provide at least two bucket URLs")
             return
 
-        if not production_branch or not test_branch:
-            st.error("❌ Please provide both production and test branch names/IDs")
+        # Parse bucket URLs
+        bucket_urls = [line.strip() for line in bucket_urls_input.strip().split("\n") if line.strip()]
+
+        if len(bucket_urls) < 2:
+            st.error("❌ Please provide at least two bucket URLs to compare")
             return
 
-        if not bucket_ids_input.strip():
-            st.error("❌ Please provide at least one bucket ID")
+        if len(bucket_urls) % 2 != 0:
+            st.error("❌ Please provide bucket URLs in pairs (even number of URLs required)")
             return
 
-        # Parse bucket IDs
-        bucket_ids = [line.strip() for line in bucket_ids_input.strip().split("\n") if line.strip()]
-
-        if not bucket_ids:
-            st.error("❌ Please provide at least one valid bucket ID")
-            return
-
-        validate_bucket_comparison(user_token, kbc_url, production_branch, test_branch, bucket_ids, auto_run, workspace_url)
+        validate_bucket_comparison(user_token, bucket_urls, auto_run, workspace_url)
 
 
 def parse_config_url(input_str: str) -> tuple:
@@ -696,33 +691,39 @@ def validate_table_comparison(user_token: str, kbc_url: str, table_ids: list, au
             st.exception(e)
 
 
-def validate_bucket_comparison(
-    user_token: str, kbc_url: str, production_branch: str, test_branch: str, bucket_ids: list, auto_run: bool, workspace_url: str = ""
-):
+def validate_bucket_comparison(user_token: str, bucket_urls: list, auto_run: bool, workspace_url: str = ""):
     """
-    Validate bucket comparison inputs and prepare for execution.
+    Validate bucket comparison inputs using bucket URLs.
 
     Args:
         user_token: Keboola admin token
-        kbc_url: Keboola connection URL
-        production_branch: Production branch name/ID
-        test_branch: Test branch name/ID
-        bucket_ids: List of bucket IDs to compare
+        bucket_urls: List of bucket URLs to compare (in pairs)
         auto_run: Whether to automatically run all steps to completion
         workspace_url: Optional workspace URL for SQL-level comparisons
     """
-    with st.spinner("Validating buckets..."):
+    with st.spinner("Validating bucket URLs..."):
         try:
+            # Parse all bucket URLs
+            parsed_buckets = []
+            for url in bucket_urls:
+                try:
+                    parsed = parse_bucket_url(url)
+                    parsed_buckets.append(parsed)
+                except ValueError as e:
+                    st.error(f"❌ Invalid bucket URL: {str(e)}")
+                    return
+
+            # Extract KBC URL from first bucket (all should be same project)
+            kbc_url = parsed_buckets[0]["base_url"]
+
             # Validate workspace URL if provided (fail fast)
             workspace_id = None
             if workspace_url and workspace_url.strip():
                 try:
                     ws_base_url, ws_config_id = parse_workspace_url(workspace_url)
-                    # Use provided kbc_url if available, otherwise use the one from workspace URL
-                    effective_kbc_url = kbc_url if kbc_url else ws_base_url
                     # Validate workspace exists
                     workspace_data = validate_workspace(
-                        effective_kbc_url,
+                        kbc_url,
                         user_token,
                         ws_config_id
                     )
@@ -732,31 +733,57 @@ def validate_bucket_comparison(
                     st.error(f"❌ Invalid workspace URL: {str(e)}")
                     return
 
-            client = KeboolaAPIClient(token_override=user_token, kbc_url_override=kbc_url, workspace_id=workspace_id)
+            # Create bucket pairs for comparison
+            bucket_pairs = []
+            for i in range(0, len(parsed_buckets), 2):
+                bucket_a = parsed_buckets[i]
+                bucket_b = parsed_buckets[i + 1]
+                bucket_pairs.append({
+                    "bucket_a": bucket_a,
+                    "bucket_b": bucket_b,
+                })
 
-            # Resolve branch names to IDs if needed
-            prod_branch_id = resolve_branch_id(client, production_branch)
-            test_branch_id = resolve_branch_id(client, test_branch)
+            # Display parsed info
+            st.success(f"✅ Parsed {len(bucket_urls)} bucket URL(s) → {len(bucket_pairs)} comparison pair(s)")
 
-            st.success(f"✅ Validated {len(bucket_ids)} bucket(s) for comparison")
-            st.info(f"**Production Branch:** {production_branch} (ID: {prod_branch_id})")
-            st.info(f"**Test Branch:** {test_branch} (ID: {test_branch_id})")
+            for idx, pair in enumerate(bucket_pairs):
+                bucket_a = pair["bucket_a"]
+                bucket_b = pair["bucket_b"]
+                branch_a_display = f"Branch {bucket_a['branch_id']}" if bucket_a["branch_id"] else "Production"
+                branch_b_display = f"Branch {bucket_b['branch_id']}" if bucket_b["branch_id"] else "Production"
+
+                st.info(f"""
+                **Pair {idx + 1}:**
+                - 🔵 {branch_a_display}: `{bucket_a['canonical_bucket_id']}`
+                - 🟢 {branch_b_display}: `{bucket_b['canonical_bucket_id']}`
+                """)
 
             # Store in session state
             st.session_state.comparison_mode = "buckets"
             st.session_state.input_validated = True
             st.session_state.user_token = user_token
             st.session_state.kbc_url = kbc_url
-            st.session_state.production_branch_name = production_branch
-            st.session_state.test_branch_name = test_branch
-            st.session_state.production_branch_id = prod_branch_id
-            st.session_state.test_branch_id = test_branch_id
-            st.session_state.bucket_ids_to_compare = bucket_ids
-            # Persist raw bucket IDs for form restoration
-            st.session_state.bucket_ids_input = "\n".join(bucket_ids)
+            st.session_state.bucket_pairs = bucket_pairs  # New: structured bucket pair info
+            st.session_state.bucket_urls_input = "\n".join(bucket_urls)  # For form restoration
             st.session_state.auto_run = auto_run
             st.session_state.workspace_url = workspace_url
-            st.session_state.workspace_id = workspace_id  # None if not provided
+            st.session_state.workspace_id = workspace_id
+
+            # For backward compatibility with orchestration page (use first pair)
+            if bucket_pairs:
+                first_pair = bucket_pairs[0]
+                st.session_state.production_branch_id = first_pair["bucket_a"]["branch_id"]
+                st.session_state.test_branch_id = first_pair["bucket_b"]["branch_id"]
+                st.session_state.production_branch_name = (
+                    f"Branch {first_pair['bucket_a']['branch_id']}"
+                    if first_pair["bucket_a"]["branch_id"]
+                    else "Production"
+                )
+                st.session_state.test_branch_name = (
+                    f"Branch {first_pair['bucket_b']['branch_id']}"
+                    if first_pair["bucket_b"]["branch_id"]
+                    else "Production"
+                )
 
             st.success("✅ Buckets validated successfully!")
             if auto_run:

@@ -63,6 +63,98 @@ def parse_workspace_url(workspace_url: str) -> Tuple[str, str]:
     return base_url, configuration_id
 
 
+def parse_bucket_url(bucket_url: str) -> Dict[str, Any]:
+    """
+    Parse a Keboola bucket URL to extract base URL, branch ID, and bucket ID.
+
+    Handles both production and dev branch URLs:
+    - Production: https://connection.../admin/projects/4214/storage/in.c-mybucket/overview
+    - Dev branch: https://connection.../admin/projects/4214/branch/27405/storage/in.c-27405-mybucket/overview
+
+    Args:
+        bucket_url: Full bucket URL from Keboola platform
+
+    Returns:
+        Dict with keys:
+            - base_url: Keboola connection base URL
+            - project_id: Project ID
+            - branch_id: Branch ID (None for production/default branch)
+            - bucket_id: Full bucket ID as it appears in the URL
+            - canonical_bucket_id: Bucket ID without branch prefix (for display)
+
+    Raises:
+        ValueError: If URL format is invalid
+    """
+    if not bucket_url or not bucket_url.strip():
+        raise ValueError("Bucket URL cannot be empty")
+
+    bucket_url = bucket_url.strip()
+
+    # Validate URL format
+    if not bucket_url.startswith(("http://", "https://")):
+        raise ValueError("Bucket URL must start with http:// or https://")
+
+    # Parse URL
+    parsed = urlparse(bucket_url)
+
+    # Extract base URL (scheme + netloc)
+    base_url = f"{parsed.scheme}://{parsed.netloc}"
+
+    # Try dev branch pattern first:
+    # /admin/projects/{project_id}/branch/{branch_id}/storage/{bucket_id}/...
+    branch_match = re.match(
+        r"/admin/projects/(\d+)/branch/(\d+)/storage/((?:in|out)\.c-[a-zA-Z0-9_-]+)(?:/.*)?$",
+        parsed.path
+    )
+
+    if branch_match:
+        project_id = branch_match.group(1)
+        branch_id = branch_match.group(2)
+        bucket_id = branch_match.group(3)
+
+        # Extract canonical bucket ID (without branch prefix)
+        # Pattern: in.c-{branch_id}-{name} -> in.c-{name}
+        canonical_match = re.match(r"^(in|out)\.c-\d+-(.+)$", bucket_id)
+        if canonical_match:
+            canonical_bucket_id = f"{canonical_match.group(1)}.c-{canonical_match.group(2)}"
+        else:
+            canonical_bucket_id = bucket_id
+
+        return {
+            "base_url": base_url,
+            "project_id": project_id,
+            "branch_id": branch_id,
+            "bucket_id": bucket_id,
+            "canonical_bucket_id": canonical_bucket_id,
+        }
+
+    # Try production/default branch pattern:
+    # /admin/projects/{project_id}/storage/{bucket_id}/...
+    prod_match = re.match(
+        r"/admin/projects/(\d+)/storage/((?:in|out)\.c-[a-zA-Z0-9_-]+)(?:/.*)?$",
+        parsed.path
+    )
+
+    if prod_match:
+        project_id = prod_match.group(1)
+        bucket_id = prod_match.group(2)
+
+        return {
+            "base_url": base_url,
+            "project_id": project_id,
+            "branch_id": None,  # Default/production branch
+            "bucket_id": bucket_id,
+            "canonical_bucket_id": bucket_id,
+        }
+
+    raise ValueError(
+        f"Invalid bucket URL format. Expected one of:\n"
+        f"  - Production: https://connection.*.keboola.com/admin/projects/{{project_id}}/storage/{{bucket_id}}/...\n"
+        f"  - Dev branch: https://connection.*.keboola.com/admin/projects/{{project_id}}/branch/{{branch_id}}/storage/{{bucket_id}}/...\n"
+        f"Got: {bucket_url}"
+    )
+
+
 def validate_workspace(kbc_url: str, token: str, configuration_id: str) -> Dict[str, Any]:
     """
     Validate that a workspace configuration ID exists by calling the Keboola API.
