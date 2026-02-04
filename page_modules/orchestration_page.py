@@ -566,7 +566,7 @@ def execution_phase(client: KeboolaAPIClient):
 
     # Auto-run or manual button trigger
     auto_run_enabled = st.session_state.get("auto_run", False)
-    trigger_jobs = auto_run_enabled or st.button("Start Comparison Runs", type="primary", use_container_width=True)
+    trigger_jobs = auto_run_enabled or st.button("Start Comparison Runs", type="primary", width="stretch")
 
     if trigger_jobs:
         with st.spinner("Triggering jobs..."):
@@ -682,7 +682,7 @@ def monitoring_phase(client: KeboolaAPIClient):
         # Prevent multiple comparison triggers
         if not st.session_state.get("comparison_triggered"):
             trigger_comparison = auto_run_enabled or st.button(
-                "Proceed to Comparison", type="primary", use_container_width=True
+                "Proceed to Comparison", type="primary", width="stretch"
             )
 
             if trigger_comparison:
@@ -852,7 +852,7 @@ def direct_comparison_page(client: KeboolaAPIClient):
 
     # Auto-run or manual trigger
     auto_run_enabled = st.session_state.get("auto_run", False)
-    trigger_comparison = auto_run_enabled or st.button("Start Comparison", type="primary", use_container_width=True)
+    trigger_comparison = auto_run_enabled or st.button("Start Comparison", type="primary", width="stretch")
 
     if trigger_comparison:
         # Clear Streamlit cache to ensure fresh data

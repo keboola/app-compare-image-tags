@@ -99,7 +99,7 @@ def main():
 
     # Reset button
     st.sidebar.markdown("---")
-    if st.sidebar.button("🔄 Start New Comparison", use_container_width=True):
+    if st.sidebar.button("🔄 Start New Comparison", width="stretch"):
         # Clear all session state
         for key in list(st.session_state.keys()):
             del st.session_state[key]

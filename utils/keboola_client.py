@@ -930,6 +930,120 @@ class KeboolaAPIClient:
 
         return pd.DataFrame()
 
+    def _execute_query_service_batch(_self, queries: List[str], numeric_branch_id: str) -> List[pd.DataFrame]:
+        """
+        Execute multiple queries via Keboola Query Service in a single batch.
+
+        Args:
+            queries: List of SQL queries to execute
+            numeric_branch_id: Numeric branch ID (NOT "default")
+
+        Returns:
+            List of DataFrames with query results (one per query)
+        """
+        if not queries:
+            return []
+
+        headers = _self.headers.copy()
+        headers["Content-Type"] = "application/json"
+        headers["Accept"] = "application/json"
+
+        # Step 1: Submit batch query job
+        submit_url = (
+            f"{_self.query_service_url}/api/v1/branches/{numeric_branch_id}/workspaces/{_self.workspace_id}/queries"
+        )
+
+        payload = {"statements": queries}
+
+        response = requests.post(submit_url, headers=headers, json=payload)
+        response.raise_for_status()
+
+        job_data = response.json()
+        query_job_id = job_data.get("queryJobId")
+
+        if not query_job_id:
+            raise ValueError(f"Query Service did not return a queryJobId: {job_data}")
+
+        # Step 2: Poll for job completion
+        status_url = f"{_self.query_service_url}/api/v1/queries/{query_job_id}"
+
+        max_attempts = 60  # 60 * 2 seconds = 2 minutes timeout
+        status_data = None
+        for _ in range(max_attempts):
+            status_response = requests.get(status_url, headers=headers)
+            status_response.raise_for_status()
+
+            status_data = status_response.json()
+            status = status_data.get("status")
+
+            if status == "completed":
+                break
+            elif status in ["failed", "cancelled", "canceled"]:
+                error_msg = status_data.get("error", {}).get("message", "Unknown error")
+                raise ValueError(f"Query job failed: {error_msg}")
+            elif status in ["created", "enqueued", "processing"]:
+                time.sleep(2)
+            else:
+                time.sleep(2)
+        else:
+            raise TimeoutError(f"Query job {query_job_id} did not complete within timeout")
+
+        # Step 3: Get results for each statement
+        statements = status_data.get("statements", [])
+        results = []
+
+        for i, stmt in enumerate(statements):
+            statement_id = stmt.get("id", i)
+            results_url = f"{_self.query_service_url}/api/v1/queries/{query_job_id}/{statement_id}/results"
+
+            results_response = requests.get(results_url, headers=headers)
+            results_response.raise_for_status()
+
+            result_data = results_response.json()
+
+            # Parse results into DataFrame
+            columns = [col.get("name", f"col_{j}") for j, col in enumerate(result_data.get("columns", []))]
+            rows = result_data.get("rows", [])
+
+            if rows and columns:
+                results.append(pd.DataFrame(rows, columns=columns))
+            else:
+                results.append(pd.DataFrame())
+
+        return results
+
+    def execute_queries_batch(
+        _self, queries: List[str], branch_id: Optional[str] = None, batch_size: int = 50
+    ) -> List[pd.DataFrame]:
+        """
+        Execute multiple SQL queries in batches via Keboola Query Service.
+
+        Args:
+            queries: List of SQL queries to execute
+            branch_id: Branch ID (None for default branch)
+            batch_size: Maximum statements per batch (default 50)
+
+        Returns:
+            List of DataFrames with query results (one per query, in same order)
+        """
+        if not _self.workspace_id:
+            raise ValueError("KBC_WORKSPACE_ID must be configured for queries")
+
+        if not queries:
+            return []
+
+        # Resolve to numeric branch ID
+        numeric_branch_id = _self._resolve_branch_id(branch_id)
+
+        # Execute in batches
+        all_results = []
+        for i in range(0, len(queries), batch_size):
+            batch = queries[i : i + batch_size]
+            batch_results = _self._execute_query_service_batch(batch, numeric_branch_id)
+            all_results.extend(batch_results)
+
+        return all_results
+
     def execute_query(_self, query: str, branch_id: Optional[str] = None, return_dataframe: bool = True):
         """
         Execute a custom SQL query via Keboola Query Service API.

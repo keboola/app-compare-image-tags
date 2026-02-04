@@ -187,7 +187,7 @@ def display_metadata_differences(comparison: Dict[str, Any]):
 
                 if type_rows:
                     type_df = pd.DataFrame(type_rows)
-                    st.dataframe(type_df, use_container_width=True)
+                    st.dataframe(type_df, width="stretch")
                 else:
                     st.info("No data type differences to display")
 
@@ -305,7 +305,7 @@ def display_row_differences(differences: Dict[str, Any]):
             color_continuous_scale="Reds",
         )
         fig.update_layout(showlegend=False)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     # Sample differences table
     if differences.get("sample_differences"):
@@ -338,7 +338,7 @@ def display_row_differences(differences: Dict[str, Any]):
                 )
 
         sample_df = pd.DataFrame(sample_data)
-        st.dataframe(sample_df, use_container_width=True)
+        st.dataframe(sample_df, width="stretch")
 
         # Export option
         csv = sample_df.to_csv(index=False)

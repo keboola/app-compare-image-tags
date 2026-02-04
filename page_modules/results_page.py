@@ -34,7 +34,7 @@ def create_results_page():
     # Add rerun comparison button at the top
     col1, col2 = st.columns([3, 1])
     with col2:
-        if st.button("🔄 Rerun Comparison", use_container_width=True):
+        if st.button("🔄 Rerun Comparison", width="stretch"):
             # Clear current results and trigger rerun
             st.session_state.comparison_results = None
             st.session_state.comparison_triggered = False
@@ -307,7 +307,7 @@ def display_differences_tab(results: dict):
         import pandas as pd
 
         summary_df = pd.DataFrame(summary_data)
-        st.dataframe(summary_df, use_container_width=True)
+        st.dataframe(summary_df, width="stretch")
 
 
 def display_log_comparison_tab(results: dict):
