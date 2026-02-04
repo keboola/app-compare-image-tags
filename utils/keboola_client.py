@@ -705,10 +705,11 @@ class KeboolaAPIClient:
         bucket = response.json()
         return [table["name"] for table in bucket.get("tables", [])]
 
-    @st.cache_data(ttl=300)
-    def get_table_detail(_self, table_id: str, branch_id: Optional[str] = None) -> Dict[str, Any]:
+    def _get_table_detail_raw(self, table_id: str, branch_id: Optional[str] = None) -> Dict[str, Any]:
         """
-        Get detailed table metadata.
+        Get detailed table metadata (thread-safe, no Streamlit dependencies).
+
+        This method is safe to call from worker threads (ThreadPoolExecutor).
 
         Args:
             table_id: Full table ID without branch prefix (e.g., "in.c-bucket.table")
@@ -717,7 +718,7 @@ class KeboolaAPIClient:
         Returns:
             Table metadata dictionary including columns, PKs, types, row count
         """
-        branch_id = _self._normalize_branch_id(branch_id)
+        branch_id = self._normalize_branch_id(branch_id)
 
         # Add branch ID to table_id if in dev branch
         # Pattern: "in.c-bucket.table" -> "in.c-20533-bucket.table"
@@ -735,26 +736,42 @@ class KeboolaAPIClient:
         else:
             full_table_id = table_id
 
-        url = f"{_self.storage_url}/v2/storage/tables/{full_table_id}"
+        url = f"{self.storage_url}/v2/storage/tables/{full_table_id}"
 
-        response = requests.get(url, headers=_self.headers)
+        response = requests.get(url, headers=self.headers)
         response.raise_for_status()
 
         try:
             result = response.json()
         except ValueError as e:
-            error_msg = f"❌ API returned invalid JSON for table {full_table_id}. Status: {response.status_code}, Content: {response.text[:200]}..."
-            st.error(error_msg)
-            # Re-raise with a clear message
+            error_msg = f"API returned invalid JSON for table {full_table_id}. Status: {response.status_code}, Content: {response.text[:200]}..."
             raise ValueError(error_msg) from e
 
-        # Debug: Verify we got a dict
+        # Verify we got a dict
         if not isinstance(result, dict):
-            st.error(f"❌ API returned non-dict for table {full_table_id}: {type(result)}")
-            st.write("Response:", result)
             raise ValueError(f"get_table_detail expected dict, got {type(result)}: {result}")
 
         return result
+
+    @st.cache_data(ttl=300)
+    def get_table_detail(_self, table_id: str, branch_id: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Get detailed table metadata (cached, with Streamlit UI feedback).
+
+        Note: For thread-safe access without Streamlit, use _get_table_detail_raw().
+
+        Args:
+            table_id: Full table ID without branch prefix (e.g., "in.c-bucket.table")
+            branch_id: Branch ID (None for default branch) - can be int or str
+
+        Returns:
+            Table metadata dictionary including columns, PKs, types, row count
+        """
+        try:
+            return _self._get_table_detail_raw(table_id, branch_id)
+        except ValueError as e:
+            st.error(f"❌ {str(e)}")
+            raise
 
     # ==================== Job Management ====================
 

@@ -274,6 +274,9 @@ class ComparisonEngine:
         """
         Fetch metadata for a single table (used for parallel execution).
 
+        Uses thread-safe _get_table_detail_raw() method to avoid Streamlit
+        ScriptRunContext warnings when called from ThreadPoolExecutor.
+
         Args:
             table_id: Table ID to fetch
             branch: Branch ID
@@ -283,7 +286,8 @@ class ComparisonEngine:
             Tuple of (table_id, branch_name, metadata_dict or None, error_message or None)
         """
         try:
-            meta = self.client.get_table_detail(table_id, branch)
+            # Use thread-safe method (no Streamlit decorators/calls)
+            meta = self.client._get_table_detail_raw(table_id, branch)
             if not isinstance(meta, dict):
                 return (table_id, branch_name, None, f"Expected dict, got {type(meta)}: {meta}")
             return (table_id, branch_name, meta, None)
@@ -841,6 +845,7 @@ class ComparisonEngine:
 
         # Build result
         result = {
+            "table_id": table_id,
             "total_rows_compared": max(prod_count, test_count),
             "production_row_count": prod_count,
             "test_row_count": test_count,
@@ -868,30 +873,110 @@ class ComparisonEngine:
         result["status"] = ComparisonStatus.DIFFER
 
         # Generate sample differences for display
+        # Match rows by PK to show actual column-level changes (like pandas compare)
         if not prod_only_df.empty or not test_only_df.empty:
             if primary_keys and all(pk in prod_only_df.columns for pk in primary_keys):
-                sample_prod = prod_only_df.head(self.SAMPLE_DISPLAY_LIMIT)
-                for _, row in sample_prod.iterrows():
-                    pk_dict = {pk: row[pk] for pk in primary_keys}
+                # Index both DataFrames by PK for matching
+                prod_indexed = prod_only_df.set_index(primary_keys) if not prod_only_df.empty else pd.DataFrame()
+                test_indexed = test_only_df.set_index(primary_keys) if not test_only_df.empty else pd.DataFrame()
+
+                # Find PKs that exist in both (these are actual value changes)
+                if not prod_indexed.empty and not test_indexed.empty:
+                    common_pks = prod_indexed.index.intersection(test_indexed.index)
+                    prod_only_pks = prod_indexed.index.difference(test_indexed.index)
+                    test_only_pks = test_indexed.index.difference(prod_indexed.index)
+                else:
+                    common_pks = pd.Index([])
+                    prod_only_pks = prod_indexed.index if not prod_indexed.empty else pd.Index([])
+                    test_only_pks = test_indexed.index if not test_indexed.empty else pd.Index([])
+
+                # Update counts for truly unique rows vs changed rows
+                result["rows_with_value_changes"] = len(common_pks)
+                result["rows_only_in_production"] = len(prod_only_pks)
+                result["rows_only_in_test"] = len(test_only_pks)
+
+                # Show column-level differences for rows that exist in both (value changes)
+                sample_count = 0
+                for pk in list(common_pks)[: self.SAMPLE_DISPLAY_LIMIT]:
+                    prod_row = prod_indexed.loc[pk]
+                    test_row = test_indexed.loc[pk]
+
+                    # Build PK dict
+                    if isinstance(pk, tuple):
+                        pk_dict = {k: v for k, v in zip(primary_keys, pk)}
+                    else:
+                        pk_dict = {primary_keys[0]: pk}
+
+                    # Find columns that differ
+                    changed_columns = {}
+                    for col in prod_row.index:
+                        prod_val = prod_row[col]
+                        test_val = test_row[col]
+                        if str(prod_val) != str(test_val):
+                            changed_columns[col] = {
+                                "production": str(prod_val),
+                                "test": str(test_val),
+                            }
+
+                    if changed_columns:
+                        result["sample_differences"].append(
+                            {
+                                "primary_key": pk_dict,
+                                "source": "value_changed",
+                                "changed_columns": changed_columns,
+                            }
+                        )
+                        sample_count += 1
+
+                # Show truly unique rows (only in prod)
+                remaining_slots = self.SAMPLE_DISPLAY_LIMIT - sample_count
+                for pk in list(prod_only_pks)[:remaining_slots]:
+                    prod_row = prod_indexed.loc[pk]
+                    if isinstance(pk, tuple):
+                        pk_dict = {k: v for k, v in zip(primary_keys, pk)}
+                    else:
+                        pk_dict = {primary_keys[0]: pk}
                     result["sample_differences"].append(
                         {
                             "primary_key": pk_dict,
                             "source": "production_only",
-                            "values": {col: str(row[col]) for col in row.index if col not in primary_keys},
+                            "values": {col: str(prod_row[col]) for col in prod_row.index},
                         }
                     )
 
-            if primary_keys and all(pk in test_only_df.columns for pk in primary_keys):
-                sample_test = test_only_df.head(self.SAMPLE_DISPLAY_LIMIT)
-                for _, row in sample_test.iterrows():
-                    pk_dict = {pk: row[pk] for pk in primary_keys}
+                # Show truly unique rows (only in test)
+                for pk in list(test_only_pks)[:remaining_slots]:
+                    test_row = test_indexed.loc[pk]
+                    if isinstance(pk, tuple):
+                        pk_dict = {k: v for k, v in zip(primary_keys, pk)}
+                    else:
+                        pk_dict = {primary_keys[0]: pk}
                     result["sample_differences"].append(
                         {
                             "primary_key": pk_dict,
                             "source": "test_only",
-                            "values": {col: str(row[col]) for col in row.index if col not in primary_keys},
+                            "values": {col: str(test_row[col]) for col in test_row.index},
                         }
                     )
+
+            else:
+                # No PKs - can't match rows, just show samples from each side
+                if not prod_only_df.empty:
+                    for _, row in prod_only_df.head(self.SAMPLE_DISPLAY_LIMIT).iterrows():
+                        result["sample_differences"].append(
+                            {
+                                "source": "production_only",
+                                "values": {col: str(row[col]) for col in row.index},
+                            }
+                        )
+                if not test_only_df.empty:
+                    for _, row in test_only_df.head(self.SAMPLE_DISPLAY_LIMIT).iterrows():
+                        result["sample_differences"].append(
+                            {
+                                "source": "test_only",
+                                "values": {col: str(row[col]) for col in row.index},
+                            }
+                        )
 
         return result
 

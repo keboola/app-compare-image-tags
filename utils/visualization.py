@@ -279,12 +279,31 @@ def display_row_differences(differences: Dict[str, Any]):
             row_diff = abs(differences.get("production_row_count", 0) - differences.get("test_row_count", 0))
             st.metric("Row Count Difference", f"{row_diff:,}")
 
-        if differences.get("rows_only_in_production", 0) > 0 or differences.get("rows_only_in_test", 0) > 0:
-            col1, col2 = st.columns(2)
+        # Show breakdown: value changes vs truly unique rows
+        value_changes = differences.get("rows_with_value_changes", 0)
+        prod_only = differences.get("rows_only_in_production", 0)
+        test_only = differences.get("rows_only_in_test", 0)
+
+        if value_changes > 0 or prod_only > 0 or test_only > 0:
+            col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("Rows Only in Production", f"{differences.get('rows_only_in_production', 0):,}")
+                st.metric(
+                    "Rows with Value Changes",
+                    f"{value_changes:,}",
+                    help="Rows that exist in both but have different values",
+                )
             with col2:
-                st.metric("Rows Only in Test", f"{differences.get('rows_only_in_test', 0):,}")
+                st.metric(
+                    "Rows Only in Production",
+                    f"{prod_only:,}",
+                    help="Rows that exist only in production (deleted or new in test)",
+                )
+            with col3:
+                st.metric(
+                    "Rows Only in Test",
+                    f"{test_only:,}",
+                    help="Rows that exist only in test (new rows)",
+                )
 
     st.markdown("---")
 
@@ -315,22 +334,38 @@ def display_row_differences(differences: Dict[str, Any]):
         # Convert to DataFrame for display
         sample_data = []
         for diff in differences["sample_differences"]:
-            if comparison_method == "sql":
+            pk_str = ", ".join([f"{k}={v}" for k, v in diff.get("primary_key", {}).items()])
+            source = diff.get("source", "unknown")
+
+            if source == "value_changed" and "changed_columns" in diff:
+                # New SQL format with column-level detail: show each changed column as a row
+                for col, vals in diff["changed_columns"].items():
+                    sample_data.append(
+                        {
+                            "Primary Key": pk_str,
+                            "Source": "value_changed",
+                            "Column": col,
+                            "Production Value": vals.get("production", ""),
+                            "Test Value": vals.get("test", ""),
+                        }
+                    )
+            elif comparison_method == "sql" or "values" in diff:
                 # SQL format: {primary_key: {}, source: 'production_only'/'test_only', values: {}}
-                pk_str = ", ".join([f"{k}={v}" for k, v in diff.get("primary_key", {}).items()])
                 sample_data.append(
                     {
                         "Primary Key": pk_str,
-                        "Source": diff.get("source", "unknown"),
-                        "Values": str(diff.get("values", {})),
+                        "Source": source,
+                        "Column": "(all columns)",
+                        "Production Value": str(diff.get("values", {})) if source == "production_only" else "",
+                        "Test Value": str(diff.get("values", {})) if source == "test_only" else "",
                     }
                 )
             else:
                 # Pandas format: {primary_key: {}, column: '', production_value: '', test_value: ''}
-                pk_str = ", ".join([f"{k}={v}" for k, v in diff.get("primary_key", {}).items()])
                 sample_data.append(
                     {
                         "Primary Key": pk_str,
+                        "Source": "value_changed",
                         "Column": diff.get("column", ""),
                         "Production Value": diff.get("production_value", ""),
                         "Test Value": diff.get("test_value", ""),
