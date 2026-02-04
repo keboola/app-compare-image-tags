@@ -45,13 +45,11 @@ If you haven't already created a workspace:
 
 3. **Configure Environment Variables:**
 
-   Keboola automatically provides some environment variables, but you need to add:
-
-   - `KBC_WORKSPACE_ID`: Your workspace ID from Step 2
-
    The following are automatically provided by Keboola:
    - `KBC_URL`: Connection URL for your project
    - `KBC_TOKEN`: Storage API token with appropriate permissions
+
+   **Note**: Workspace configuration is now provided via the UI. Users can optionally provide their Workspace URL in the input form for full SQL-level comparisons.
 
 4. **Deploy:**
    - Click **Create & Deploy**
@@ -175,9 +173,10 @@ To update your deployed app:
 **Symptoms**: "Workspace not found" or query errors
 
 **Solutions**:
-- Verify `KBC_WORKSPACE_ID` is correctly configured
-- Ensure workspace exists and is active
-- Check workspace type is compatible (Python/Snowflake/BigQuery)
+- Ensure you've provided a valid Workspace URL in the input form
+- Verify the workspace exists and is accessible with your token
+- Check workspace type is compatible (Snowflake/BigQuery)
+- **Without Workspace URL**: Comparisons will use row limits and in-app comparison (safer for large tables but may not compare all data)
 
 ### Performance Issues
 

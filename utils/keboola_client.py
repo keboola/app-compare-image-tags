@@ -6,8 +6,10 @@ including configuration management, branch operations, job execution, and data q
 """
 
 import json
+import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import pandas as pd
 import requests
@@ -16,26 +18,137 @@ import streamlit as st
 from .config import get_config
 
 
+def parse_workspace_url(workspace_url: str) -> Tuple[str, str]:
+    """
+    Parse a Keboola workspace URL to extract the base URL and configuration ID.
+
+    Args:
+        workspace_url: Full workspace URL like:
+            https://connection.us-east4.gcp.keboola.com/admin/projects/4214/workspaces/01kg4cky9chn32aqaxq7ejnrzj
+
+    Returns:
+        Tuple of (base_url, configuration_id)
+
+    Raises:
+        ValueError: If URL format is invalid
+    """
+    if not workspace_url or not workspace_url.strip():
+        raise ValueError("Workspace URL cannot be empty")
+
+    workspace_url = workspace_url.strip()
+
+    # Validate URL format
+    if not workspace_url.startswith(("http://", "https://")):
+        raise ValueError("Workspace URL must start with http:// or https://")
+
+    # Parse URL
+    parsed = urlparse(workspace_url)
+
+    # Extract base URL (scheme + netloc)
+    base_url = f"{parsed.scheme}://{parsed.netloc}"
+
+    # Extract configuration ID from path
+    # Expected pattern: /admin/projects/{project_id}/workspaces/{configuration_id}
+    path_match = re.match(r"/admin/projects/\d+/workspaces/([a-zA-Z0-9]+)/?$", parsed.path)
+
+    if not path_match:
+        raise ValueError(
+            f"Invalid workspace URL format. Expected: "
+            f"https://connection.*.keboola.com/admin/projects/{{project_id}}/workspaces/{{workspace_config_id}}\n"
+            f"Got: {workspace_url}"
+        )
+
+    configuration_id = path_match.group(1)
+
+    return base_url, configuration_id
+
+
+def validate_workspace(kbc_url: str, token: str, configuration_id: str) -> Dict[str, Any]:
+    """
+    Validate that a workspace configuration ID exists by calling the Keboola API.
+
+    Args:
+        kbc_url: Keboola connection base URL
+        token: Storage API token
+        configuration_id: Workspace configuration ID from the URL
+
+    Returns:
+        Workspace data dictionary if found
+
+    Raises:
+        ValueError: If workspace not found or API call fails
+    """
+    # Trim trailing slashes
+    kbc_url = kbc_url.rstrip("/")
+
+    # Call the workspaces API
+    url = f"{kbc_url}/v2/storage/workspaces"
+    headers = {"X-StorageApi-Token": token}
+
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+    except requests.exceptions.HTTPError as e:
+        if response.status_code == 401:
+            raise ValueError("Invalid API token - authentication failed") from e
+        elif response.status_code == 403:
+            raise ValueError("API token does not have permission to list workspaces") from e
+        else:
+            raise ValueError(f"Failed to list workspaces: {response.status_code} - {response.text}") from e
+    except requests.exceptions.RequestException as e:
+        raise ValueError(f"Network error when listing workspaces: {str(e)}") from e
+
+    workspaces = response.json()
+
+    # Find workspace with matching configuration ID
+    for workspace in workspaces:
+        if workspace.get("configurationId") == configuration_id:
+            return workspace
+
+    # Not found - provide helpful error message
+    available_ids = [w.get("configurationId") for w in workspaces if w.get("configurationId")]
+    raise ValueError(
+        f"Workspace with configuration ID '{configuration_id}' not found.\n"
+        f"Available workspace configuration IDs: {available_ids[:5]}{'...' if len(available_ids) > 5 else ''}"
+    )
+
+
 class KeboolaAPIClient:
     """Unified client for all Keboola API interactions."""
 
-    def __init__(self, token_override: str = None, kbc_url_override: str = None):
+    def __init__(self, token_override: str = None, kbc_url_override: str = None, workspace_id: str = None):
         """
         Initialize the Keboola API client with credentials from config.
 
         Args:
             token_override: Optional token to use instead of config token (for admin operations)
             kbc_url_override: Optional KBC URL to use instead of config URL
+            workspace_id: Optional workspace ID for SQL queries. If not provided,
+                         will check session state for 'workspace_id', then fall back
+                         to config/env variable KBC_WORKSPACE_ID.
         """
         self.storage_url = kbc_url_override if kbc_url_override else get_config("KBC_URL", default=None)
         self.token = token_override if token_override else get_config("KBC_TOKEN", default=None)
-        self.workspace_id = get_config("KBC_WORKSPACE_ID", default=None)
+
+        # Resolve workspace_id: parameter > session state > config/env
+        if workspace_id:
+            self.workspace_id = workspace_id
+        else:
+            # Check session state first (from UI input)
+            try:
+                session_workspace_id = st.session_state.get("workspace_id")
+                if session_workspace_id:
+                    self.workspace_id = session_workspace_id
+                else:
+                    # Fall back to config/env for backward compatibility
+                    self.workspace_id = get_config("KBC_WORKSPACE_ID", default=None)
+            except Exception:
+                # Session state not available (e.g., in tests)
+                self.workspace_id = get_config("KBC_WORKSPACE_ID", default=None)
 
         # If storage_url not provided, try to derive from session state config_input
         if not self.storage_url:
             try:
-                import streamlit as st
-
                 config_input = st.session_state.get("config_input", "")
                 if config_input and config_input.startswith("http"):
                     # Extract base URL from config URL
@@ -630,8 +743,6 @@ class KeboolaAPIClient:
         try:
             result = response.json()
         except ValueError as e:
-            import streamlit as st
-
             error_msg = f"❌ API returned invalid JSON for table {full_table_id}. Status: {response.status_code}, Content: {response.text[:200]}..."
             st.error(error_msg)
             # Re-raise with a clear message
@@ -639,8 +750,6 @@ class KeboolaAPIClient:
 
         # Debug: Verify we got a dict
         if not isinstance(result, dict):
-            import streamlit as st
-
             st.error(f"❌ API returned non-dict for table {full_table_id}: {type(result)}")
             st.write("Response:", result)
             raise ValueError(f"get_table_detail expected dict, got {type(result)}: {result}")
@@ -811,7 +920,10 @@ class KeboolaAPIClient:
             DataFrame with table data
         """
         if not _self.workspace_id:
-            raise ValueError("KBC_WORKSPACE_ID must be configured for data queries")
+            raise ValueError(
+                "Workspace ID required for full SQL comparisons. "
+                "Please provide your Workspace URL in the configuration page."
+            )
 
         # Resolve to numeric branch ID (Query Service requires numeric, not "default")
         numeric_branch_id = _self._resolve_branch_id(branch_id)
@@ -1027,7 +1139,10 @@ class KeboolaAPIClient:
             List of DataFrames with query results (one per query, in same order)
         """
         if not _self.workspace_id:
-            raise ValueError("KBC_WORKSPACE_ID must be configured for queries")
+            raise ValueError(
+                "Workspace ID required for batch SQL queries. "
+                "Please provide your Workspace URL in the configuration page."
+            )
 
         if not queries:
             return []
@@ -1057,7 +1172,10 @@ class KeboolaAPIClient:
             DataFrame or dict with query results
         """
         if not _self.workspace_id:
-            raise ValueError("KBC_WORKSPACE_ID must be configured for queries")
+            raise ValueError(
+                "Workspace ID required for SQL queries. "
+                "Please provide your Workspace URL in the configuration page."
+            )
 
         # Resolve to numeric branch ID
         numeric_branch_id = _self._resolve_branch_id(branch_id)

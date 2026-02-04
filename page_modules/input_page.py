@@ -9,7 +9,7 @@ This page allows users to choose between three comparison modes:
 
 import streamlit as st
 
-from utils.keboola_client import KeboolaAPIClient
+from utils.keboola_client import KeboolaAPIClient, parse_workspace_url, validate_workspace
 
 
 def create_input_page():
@@ -68,6 +68,10 @@ def display_validated_input():
     # Display row limit for all modes
     row_limit = st.session_state.get("comparison_row_limit", 1000)
 
+    # Check workspace status
+    workspace_id = st.session_state.get("workspace_id")
+    comparison_mode_label = "Full SQL" if workspace_id else "Row-limited in-app"
+
     if mode == "config":
         st.success("✅ Configuration Comparison Mode")
         st.info(f"**Configuration:** {st.session_state['original_config']['name']}")
@@ -75,7 +79,9 @@ def display_validated_input():
         st.info(f"**Production Tag:** {st.session_state['production_image_tag']}")
         st.info(f"**Test Tag:** {st.session_state['test_image_tag']}")
         st.info(f"**Job Mode:** {st.session_state.get('job_mode', 'run')}")
-        st.info(f"**Row Limit:** {row_limit:,}")
+        st.info(f"**Comparison Mode:** {comparison_mode_label}")
+        if not workspace_id:
+            st.info(f"**Row Limit:** {row_limit:,}")
 
     elif mode == "tables":
         st.success("✅ Table Comparison Mode")
@@ -83,14 +89,18 @@ def display_validated_input():
         table_ids = st.session_state["table_ids_to_compare"]
         st.info(f"**Table 1:** {table_ids[0]}")
         st.info(f"**Table 2:** {table_ids[1]}")
-        st.info(f"**Row Limit:** {row_limit:,}")
+        st.info(f"**Comparison Mode:** {comparison_mode_label}")
+        if not workspace_id:
+            st.info(f"**Row Limit:** {row_limit:,}")
 
     elif mode == "buckets":
         st.success("✅ Bucket Comparison Mode")
         st.info(f"**Production Branch:** {st.session_state['production_branch_name']}")
         st.info(f"**Test Branch:** {st.session_state['test_branch_name']}")
         st.info(f"**Buckets to Compare:** {len(st.session_state['bucket_ids_to_compare'])}")
-        st.info(f"**Row Limit:** {row_limit:,}")
+        st.info(f"**Comparison Mode:** {comparison_mode_label}")
+        if not workspace_id:
+            st.info(f"**Row Limit:** {row_limit:,}")
         with st.expander("View bucket list"):
             for bucket_id in st.session_state["bucket_ids_to_compare"]:
                 st.text(f"  • {bucket_id}")
@@ -123,6 +133,9 @@ def clear_input_session_state():
         # "test_branch_name",       <-- KEEP
         "production_branch_id",
         "test_branch_id",
+        # Workspace (clear ID but keep URL for re-validation)
+        "workspace_id",
+        # "workspace_url",         <-- KEEP
         # Execution and Results
         "comparison_results",
         "comparison_triggered",
@@ -181,6 +194,18 @@ def create_config_comparison_form():
             key="widget_config_input",
             help="Paste the PRODUCTION configuration URL from Keboola (full URL required)",
             placeholder="e.g., https://connection.keboola.com/admin/projects/12345/components/keboola.ex-instagram-v2/01kcrfjxt5wvms53ds3vy6x5h1",
+        )
+
+        workspace_url = st.text_input(
+            "Workspace URL (Optional)",
+            value=st.session_state.get("workspace_url", ""),
+            key="widget_workspace_url_config",
+            help=(
+                "Optional: Your Keboola workspace URL. If provided, enables full SQL-level comparison of tables. "
+                "Without this, comparisons use a row limit and in-app comparison (safer for large tables). "
+                "Find it in Keboola: Workspaces > your workspace > copy URL from browser."
+            ),
+            placeholder="e.g., https://connection.keboola.com/admin/projects/12345/workspaces/01kg4cky9chn32aqaxq7ejnrzj",
         )
 
         col1, col2 = st.columns(2)
@@ -244,7 +269,7 @@ def create_config_comparison_form():
             return
 
         validate_config_comparison(
-            config_id, component_id, config_input, production_tag, test_tag, branch_name, user_token, auto_run, job_mode
+            config_id, component_id, config_input, production_tag, test_tag, branch_name, user_token, auto_run, job_mode, workspace_url
         )
 
 
@@ -277,6 +302,18 @@ def create_table_comparison_form():
             key="kbc_url_tables",
             help="Your Keboola connection URL (e.g., https://connection.keboola.com)",
             placeholder="e.g., https://connection.keboola.com",
+        )
+
+        workspace_url = st.text_input(
+            "Workspace URL (Optional)",
+            value=st.session_state.get("workspace_url", ""),
+            key="widget_workspace_url_tables",
+            help=(
+                "Optional: Your Keboola workspace URL. If provided, enables full SQL-level comparison of tables. "
+                "Without this, comparisons use a row limit and in-app comparison (safer for large tables). "
+                "Find it in Keboola: Workspaces > your workspace > copy URL from browser."
+            ),
+            placeholder="e.g., https://connection.keboola.com/admin/projects/12345/workspaces/01kg4cky9chn32aqaxq7ejnrzj",
         )
 
         col1, col2 = st.columns(2)
@@ -325,7 +362,7 @@ def create_table_comparison_form():
         # Create table IDs list
         table_ids = [table_id_1.strip(), table_id_2.strip()]
 
-        validate_table_comparison(user_token, kbc_url, table_ids, auto_run)
+        validate_table_comparison(user_token, kbc_url, table_ids, auto_run, workspace_url)
 
 
 def create_bucket_comparison_form():
@@ -361,6 +398,18 @@ def create_bucket_comparison_form():
             key="kbc_url_buckets",
             help="Your Keboola connection URL (e.g., https://connection.keboola.com)",
             placeholder="e.g., https://connection.keboola.com",
+        )
+
+        workspace_url = st.text_input(
+            "Workspace URL (Optional)",
+            value=st.session_state.get("workspace_url", ""),
+            key="widget_workspace_url_buckets",
+            help=(
+                "Optional: Your Keboola workspace URL. If provided, enables full SQL-level comparison of tables. "
+                "Without this, comparisons use a row limit and in-app comparison (safer for large tables). "
+                "Find it in Keboola: Workspaces > your workspace > copy URL from browser."
+            ),
+            placeholder="e.g., https://connection.keboola.com/admin/projects/12345/workspaces/01kg4cky9chn32aqaxq7ejnrzj",
         )
 
         col1, col2 = st.columns(2)
@@ -426,7 +475,7 @@ def create_bucket_comparison_form():
             st.error("❌ Please provide at least one valid bucket ID")
             return
 
-        validate_bucket_comparison(user_token, kbc_url, production_branch, test_branch, bucket_ids, auto_run)
+        validate_bucket_comparison(user_token, kbc_url, production_branch, test_branch, bucket_ids, auto_run, workspace_url)
 
 
 def parse_config_url(input_str: str) -> tuple:
@@ -479,6 +528,7 @@ def validate_config_comparison(
     user_token: str,
     auto_run: bool,
     job_mode: str = "run",
+    workspace_url: str = "",
 ):
     """
     Validate configuration comparison inputs and prepare for execution.
@@ -493,6 +543,7 @@ def validate_config_comparison(
         user_token: User's Keboola admin token (with branch creation permissions)
         auto_run: Whether to automatically run all steps to completion
         job_mode: Job execution mode - "run" (default) or "debug"
+        workspace_url: Optional workspace URL for SQL-level comparisons
     """
     with st.spinner("Validating configuration..."):
         try:
@@ -503,7 +554,24 @@ def validate_config_comparison(
                 if len(parts) >= 3:
                     kbc_url = f"{parts[0]}//{parts[2]}"
 
-            client = KeboolaAPIClient(token_override=user_token, kbc_url_override=kbc_url)
+            # Validate workspace URL if provided (fail fast)
+            workspace_id = None
+            if workspace_url and workspace_url.strip():
+                try:
+                    ws_base_url, ws_config_id = parse_workspace_url(workspace_url)
+                    # Validate workspace exists
+                    workspace_data = validate_workspace(
+                        kbc_url if kbc_url else ws_base_url,
+                        user_token,
+                        ws_config_id
+                    )
+                    workspace_id = str(workspace_data["id"])
+                    st.success(f"✅ Workspace validated: **{workspace_data.get('name', 'Unknown')}**")
+                except ValueError as e:
+                    st.error(f"❌ Invalid workspace URL: {str(e)}")
+                    return
+
+            client = KeboolaAPIClient(token_override=user_token, kbc_url_override=kbc_url, workspace_id=workspace_id)
 
             # Fetch config to validate it exists
             if component_id:
@@ -532,6 +600,8 @@ def validate_config_comparison(
             st.session_state.component_id = component_id
             st.session_state.auto_run = auto_run
             st.session_state.job_mode = job_mode
+            st.session_state.workspace_url = workspace_url
+            st.session_state.workspace_id = workspace_id  # None if not provided
 
             st.success("✅ Configuration validated successfully!")
             if auto_run:
@@ -554,7 +624,7 @@ def validate_config_comparison(
             st.exception(e)
 
 
-def validate_table_comparison(user_token: str, kbc_url: str, table_ids: list, auto_run: bool):
+def validate_table_comparison(user_token: str, kbc_url: str, table_ids: list, auto_run: bool, workspace_url: str = ""):
     """
     Validate table comparison inputs and prepare for execution.
 
@@ -563,11 +633,31 @@ def validate_table_comparison(user_token: str, kbc_url: str, table_ids: list, au
         kbc_url: Keboola connection URL
         table_ids: List of table IDs to compare (always 2 tables)
         auto_run: Whether to automatically run all steps to completion
+        workspace_url: Optional workspace URL for SQL-level comparisons
     """
     with st.spinner("Validating tables..."):
         try:
+            # Validate workspace URL if provided (fail fast)
+            workspace_id = None
+            if workspace_url and workspace_url.strip():
+                try:
+                    ws_base_url, ws_config_id = parse_workspace_url(workspace_url)
+                    # Use provided kbc_url if available, otherwise use the one from workspace URL
+                    effective_kbc_url = kbc_url if kbc_url else ws_base_url
+                    # Validate workspace exists
+                    workspace_data = validate_workspace(
+                        effective_kbc_url,
+                        user_token,
+                        ws_config_id
+                    )
+                    workspace_id = str(workspace_data["id"])
+                    st.success(f"✅ Workspace validated: **{workspace_data.get('name', 'Unknown')}**")
+                except ValueError as e:
+                    st.error(f"❌ Invalid workspace URL: {str(e)}")
+                    return
+
             # Validate credentials by attempting to create client
-            KeboolaAPIClient(token_override=user_token, kbc_url_override=kbc_url)
+            KeboolaAPIClient(token_override=user_token, kbc_url_override=kbc_url, workspace_id=workspace_id)
 
             st.success(f"✅ Validated {len(table_ids)} table(s) for comparison")
             st.info("**Branch:** default (main branch)")
@@ -586,6 +676,8 @@ def validate_table_comparison(user_token: str, kbc_url: str, table_ids: list, au
             st.session_state.table_id_1 = table_ids[0]
             st.session_state.table_id_2 = table_ids[1]
             st.session_state.auto_run = auto_run
+            st.session_state.workspace_url = workspace_url
+            st.session_state.workspace_id = workspace_id  # None if not provided
 
             st.success("✅ Tables validated successfully!")
             if auto_run:
@@ -605,7 +697,7 @@ def validate_table_comparison(user_token: str, kbc_url: str, table_ids: list, au
 
 
 def validate_bucket_comparison(
-    user_token: str, kbc_url: str, production_branch: str, test_branch: str, bucket_ids: list, auto_run: bool
+    user_token: str, kbc_url: str, production_branch: str, test_branch: str, bucket_ids: list, auto_run: bool, workspace_url: str = ""
 ):
     """
     Validate bucket comparison inputs and prepare for execution.
@@ -617,10 +709,30 @@ def validate_bucket_comparison(
         test_branch: Test branch name/ID
         bucket_ids: List of bucket IDs to compare
         auto_run: Whether to automatically run all steps to completion
+        workspace_url: Optional workspace URL for SQL-level comparisons
     """
     with st.spinner("Validating buckets..."):
         try:
-            client = KeboolaAPIClient(token_override=user_token, kbc_url_override=kbc_url)
+            # Validate workspace URL if provided (fail fast)
+            workspace_id = None
+            if workspace_url and workspace_url.strip():
+                try:
+                    ws_base_url, ws_config_id = parse_workspace_url(workspace_url)
+                    # Use provided kbc_url if available, otherwise use the one from workspace URL
+                    effective_kbc_url = kbc_url if kbc_url else ws_base_url
+                    # Validate workspace exists
+                    workspace_data = validate_workspace(
+                        effective_kbc_url,
+                        user_token,
+                        ws_config_id
+                    )
+                    workspace_id = str(workspace_data["id"])
+                    st.success(f"✅ Workspace validated: **{workspace_data.get('name', 'Unknown')}**")
+                except ValueError as e:
+                    st.error(f"❌ Invalid workspace URL: {str(e)}")
+                    return
+
+            client = KeboolaAPIClient(token_override=user_token, kbc_url_override=kbc_url, workspace_id=workspace_id)
 
             # Resolve branch names to IDs if needed
             prod_branch_id = resolve_branch_id(client, production_branch)
@@ -643,6 +755,8 @@ def validate_bucket_comparison(
             # Persist raw bucket IDs for form restoration
             st.session_state.bucket_ids_input = "\n".join(bucket_ids)
             st.session_state.auto_run = auto_run
+            st.session_state.workspace_url = workspace_url
+            st.session_state.workspace_id = workspace_id  # None if not provided
 
             st.success("✅ Buckets validated successfully!")
             if auto_run:
