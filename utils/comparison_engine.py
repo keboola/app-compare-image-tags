@@ -675,8 +675,14 @@ class ComparisonEngine:
 
             # Build queries for this table
             try:
+                # Check if explicit table IDs are provided (for bucket pairs mode)
+                table_pair = meta.get("_table_pair", {})
+                prod_table_id = table_pair.get("table_a_id")
+                test_table_id = table_pair.get("table_b_id")
+
                 queries = self._build_sql_comparison_queries(
-                    table_id, prod_branch, test_branch, meta["columns"]["common"], row_limit
+                    table_id, prod_branch, test_branch, meta["columns"]["common"], row_limit,
+                    prod_table_id=prod_table_id, test_table_id=test_table_id,
                 )
 
                 # Track query indices
@@ -785,23 +791,34 @@ class ComparisonEngine:
         test_branch: Optional[str],
         columns: List[str],
         row_limit: int,
+        prod_table_id: Optional[str] = None,
+        test_table_id: Optional[str] = None,
     ) -> Dict[str, str]:
         """
         Build SQL queries for table comparison without executing them.
 
         Args:
-            table_id: Table ID to compare
+            table_id: Table ID to compare (used when prod/test_table_id not provided)
             prod_branch: Production branch ID
             test_branch: Test branch ID
             columns: List of common columns to compare
             row_limit: Maximum rows to compare
+            prod_table_id: Optional explicit production table ID (for bucket pairs)
+            test_table_id: Optional explicit test table ID (for bucket pairs)
 
         Returns:
             Dictionary with query names as keys and SQL strings as values
         """
-        # Get qualified table names
-        prod_table = self.client.get_qualified_table_name(table_id, prod_branch)
-        test_table = self.client.get_qualified_table_name(table_id, test_branch)
+        # Get qualified table names - use explicit IDs if provided, otherwise build from table_id + branch
+        if prod_table_id:
+            prod_table = self.client.get_qualified_table_name(prod_table_id, None)
+        else:
+            prod_table = self.client.get_qualified_table_name(table_id, prod_branch)
+
+        if test_table_id:
+            test_table = self.client.get_qualified_table_name(test_table_id, None)
+        else:
+            test_table = self.client.get_qualified_table_name(table_id, test_branch)
 
         # Build column list (sorted for consistency) with sanitization
         column_list = ", ".join([_sanitize_sql_identifier(col) for col in sorted(columns)])
@@ -1745,15 +1762,16 @@ class ComparisonEngine:
             st.info(f"Comparing metadata for {len(all_table_pairs)} common table(s)...")
             results["metadata_comparison"] = self._compare_table_pairs_metadata(all_table_pairs)
 
-        # Step 3: Row-level comparison
+        # Step 3: Row-level comparison - reuse the existing method
         st.markdown("---")
         st.markdown("## Step 3: Row-Level Data Comparison")
 
         if not results["metadata_comparison"]:
             st.warning("⚠️ No tables to compare at row level")
         else:
-            results["row_differences"] = self._compare_table_pairs_rows(
-                all_table_pairs, results["metadata_comparison"]
+            # Reuse _compare_row_data - it will use _table_pair info from metadata for explicit table IDs
+            results["row_differences"] = self._compare_row_data(
+                None, None, results["metadata_comparison"]
             )
 
         # Generate summary
@@ -1784,7 +1802,7 @@ class ComparisonEngine:
 
     def _compare_table_pairs_metadata(self, table_pairs: List[Dict]) -> Dict[str, Any]:
         """
-        Compare metadata for table pairs.
+        Compare metadata for table pairs using parallel fetching.
 
         Args:
             table_pairs: List of table pair info dicts
@@ -1794,13 +1812,77 @@ class ComparisonEngine:
         """
         results = {}
 
+        if not table_pairs:
+            return results
+
+        st.info(f"Fetching metadata for {len(table_pairs)} table pair(s) in parallel...")
+
+        # Phase 1: Fetch all metadata in parallel using ThreadPoolExecutor
+        metadata_cache: Dict[str, Dict[str, Any]] = {}  # display_key -> {"a": meta, "b": meta}
+        fetch_errors: Dict[str, str] = {}
+
+        def fetch_metadata(table_id: str, key: str, side: str):
+            """Thread-safe metadata fetch."""
+            try:
+                url = f"{self.client.storage_url}/v2/storage/tables/{table_id}"
+                response = requests.get(url, headers=self.client.headers)
+                response.raise_for_status()
+                return (key, side, response.json(), None)
+            except Exception as e:
+                return (key, side, None, str(e))
+
+        max_workers = min(20, len(table_pairs) * 2)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = []
+
+            for pair in table_pairs:
+                display_key = pair["display_key"]
+                # Fetch both sides in parallel
+                futures.append(executor.submit(fetch_metadata, pair["table_a_id"], display_key, "a"))
+                futures.append(executor.submit(fetch_metadata, pair["table_b_id"], display_key, "b"))
+
+            # Collect results
+            for future in as_completed(futures):
+                key, side, meta, error = future.result()
+                if key not in metadata_cache:
+                    metadata_cache[key] = {}
+                if error:
+                    fetch_errors[f"{key}_{side}"] = error
+                else:
+                    metadata_cache[key][side] = meta
+
+        # Phase 2: Process results
         for pair in table_pairs:
             display_key = pair["display_key"]
-            try:
-                # Get metadata for both tables directly
-                meta_a = self._get_table_metadata_direct(pair["table_a_id"])
-                meta_b = self._get_table_metadata_direct(pair["table_b_id"])
+            cache_entry = metadata_cache.get(display_key, {})
+            meta_a = cache_entry.get("a")
+            meta_b = cache_entry.get("b")
 
+            # Check for fetch errors
+            error_a = fetch_errors.get(f"{display_key}_a")
+            error_b = fetch_errors.get(f"{display_key}_b")
+
+            if error_a or error_b:
+                error_msg = f"Fetch errors - a: {error_a}, b: {error_b}"
+                st.error(f"❌ Error fetching metadata for `{display_key}`: {error_msg}")
+                results[display_key] = {
+                    "status": ComparisonStatus.ERROR,
+                    "error": error_msg,
+                    "_table_pair": pair,
+                }
+                continue
+
+            if not meta_a or not meta_b:
+                st.error(f"❌ Missing metadata for `{display_key}`")
+                results[display_key] = {
+                    "status": ComparisonStatus.ERROR,
+                    "error": "Missing metadata",
+                    "_table_pair": pair,
+                }
+                continue
+
+            try:
                 pk_comparison = self._compare_primary_keys(meta_a, meta_b)
                 col_comparison = self._compare_columns(meta_a, meta_b)
                 type_comparison = self._compare_data_types(meta_a, meta_b)
@@ -1819,7 +1901,7 @@ class ComparisonEngine:
                     "data_types": type_comparison,
                     "row_count": count_comparison,
                     "status": ComparisonStatus.MATCH if all_match else ComparisonStatus.DIFFER,
-                    "_table_pair": pair,  # Store pair info for row comparison
+                    "_table_pair": pair,
                 }
 
                 if all_match:
@@ -1836,155 +1918,6 @@ class ComparisonEngine:
                 }
 
         return results
-
-    def _get_table_metadata_direct(self, full_table_id: str) -> Dict[str, Any]:
-        """
-        Get table metadata using the full table ID directly.
-
-        Args:
-            full_table_id: Full table ID (e.g., in.c-27405-mybucket.mytable)
-
-        Returns:
-            Table metadata dictionary
-        """
-        url = f"{self.client.storage_url}/v2/storage/tables/{full_table_id}"
-        response = requests.get(url, headers=self.client.headers)
-        response.raise_for_status()
-        return response.json()
-
-    def _compare_table_pairs_rows(
-        self, table_pairs: List[Dict], metadata_comparison: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """
-        Compare row data for table pairs.
-
-        Args:
-            table_pairs: List of table pair info dicts
-            metadata_comparison: Metadata comparison results
-
-        Returns:
-            Row comparison results
-        """
-        results = {}
-
-        for pair in table_pairs:
-            display_key = pair["display_key"]
-            meta = metadata_comparison.get(display_key, {})
-
-            # Skip if metadata error
-            if meta.get("status") == ComparisonStatus.ERROR:
-                results[display_key] = {
-                    "status": ComparisonStatus.SKIPPED,
-                    "reason": f"Metadata error: {meta.get('error')}",
-                }
-                continue
-
-            # Skip if critical metadata doesn't match
-            if (
-                not meta.get("primary_keys", {}).get("match", True)
-                or not meta.get("columns", {}).get("match", True)
-                or not meta.get("data_types", {}).get("match", True)
-            ):
-                mismatch_reasons = []
-                if not meta.get("primary_keys", {}).get("match", True):
-                    mismatch_reasons.append("primary keys")
-                if not meta.get("columns", {}).get("match", True):
-                    mismatch_reasons.append("columns")
-                if not meta.get("data_types", {}).get("match", True):
-                    mismatch_reasons.append("data types")
-
-                results[display_key] = {
-                    "status": ComparisonStatus.SKIPPED,
-                    "reason": f"Metadata mismatch: {', '.join(mismatch_reasons)}",
-                }
-                st.info(f"ℹ️ Skipping row comparison for `{display_key}`: metadata differs")
-                continue
-
-            # Try SQL comparison
-            try:
-                comparison = self._compare_tables_direct_sql(
-                    pair["table_a_id"],
-                    pair["table_b_id"],
-                    meta["columns"]["common"],
-                    meta["primary_keys"]["production"],
-                )
-                results[display_key] = comparison
-
-                if comparison["status"] == ComparisonStatus.MATCH:
-                    st.success(f"✅ Table `{display_key}`: Perfect match ({comparison.get('production_row_count', 0):,} rows)")
-                else:
-                    st.warning(f"⚠️ Table `{display_key}`: Found {comparison.get('differing_rows', 0):,} difference(s)")
-
-            except Exception as e:
-                st.warning(f"⚠️ SQL comparison failed for `{display_key}`: {str(e)}")
-                results[display_key] = {
-                    "status": ComparisonStatus.ERROR,
-                    "error": str(e),
-                }
-
-        return results
-
-    def _compare_tables_direct_sql(
-        self,
-        table_a_id: str,
-        table_b_id: str,
-        columns: List[str],
-        primary_keys: List[str],
-    ) -> Dict[str, Any]:
-        """
-        Compare two tables using direct SQL with full table IDs.
-
-        Args:
-            table_a_id: Full table A ID
-            table_b_id: Full table B ID
-            columns: Common columns to compare
-            primary_keys: Primary key columns
-
-        Returns:
-            Comparison results
-        """
-        row_limit = st.session_state.get("comparison_row_limit", self.DEFAULT_ROW_LIMIT)
-        row_limit = max(1, min(int(row_limit), self.MAX_ROW_LIMIT))
-
-        # Build qualified names from full table IDs
-        def to_qualified(table_id: str) -> str:
-            parts = table_id.split(".")
-            if len(parts) == 3:
-                schema = f"{parts[0]}.{parts[1]}"
-                table = parts[2]
-                return f'"{schema}"."{table}"'
-            return f'"{table_id}"'
-
-        table_a_qualified = to_qualified(table_a_id)
-        table_b_qualified = to_qualified(table_b_id)
-
-        column_list = ", ".join([_sanitize_sql_identifier(col) for col in sorted(columns)])
-
-        queries = [
-            f"SELECT {column_list} FROM {table_a_qualified} EXCEPT SELECT {column_list} FROM {table_b_qualified} LIMIT {row_limit}",
-            f"SELECT {column_list} FROM {table_b_qualified} EXCEPT SELECT {column_list} FROM {table_a_qualified} LIMIT {row_limit}",
-            f"SELECT COUNT(*) as count FROM {table_a_qualified}",
-            f"SELECT COUNT(*) as count FROM {table_b_qualified}",
-        ]
-
-        results_list = self.client.execute_queries_batch(queries)
-
-        a_only_df = results_list[0]
-        b_only_df = results_list[1]
-        a_count = results_list[2].iloc[0, 0] if not results_list[2].empty else 0
-        b_count = results_list[3].iloc[0, 0] if not results_list[3].empty else 0
-
-        total_differences = len(a_only_df) + len(b_only_df)
-
-        return {
-            "status": ComparisonStatus.MATCH if total_differences == 0 and a_count == b_count else ComparisonStatus.DIFFER,
-            "production_row_count": a_count,
-            "test_row_count": b_count,
-            "differing_rows": total_differences,
-            "rows_only_in_production": len(a_only_df),
-            "rows_only_in_test": len(b_only_df),
-            "comparison_method": "sql_direct",
-        }
 
     def compare_two_tables(self, table_id_1: str, table_id_2: str) -> Dict[str, Any]:
         """

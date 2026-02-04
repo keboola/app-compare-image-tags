@@ -832,11 +832,22 @@ def direct_comparison_page(client: KeboolaAPIClient):
 
     elif comparison_mode == "buckets":
         st.subheader("🗂️ Bucket Comparison")
-        st.markdown(f"""
-        **Production Branch:** {st.session_state["production_branch_name"]}
-        **Test Branch:** {st.session_state["test_branch_name"]}
-        **Buckets to Compare:** {len(st.session_state["bucket_ids_to_compare"])}
-        """)
+        bucket_pairs = st.session_state.get("bucket_pairs", [])
+        if bucket_pairs:
+            st.markdown(f"**Bucket Pairs to Compare:** {len(bucket_pairs)}")
+            for idx, pair in enumerate(bucket_pairs):
+                bucket_a = pair["bucket_a"]
+                bucket_b = pair["bucket_b"]
+                branch_a = f"Branch {bucket_a['branch_id']}" if bucket_a["branch_id"] else "Production"
+                branch_b = f"Branch {bucket_b['branch_id']}" if bucket_b["branch_id"] else "Production"
+                st.caption(f"Pair {idx + 1}: {branch_a} vs {branch_b} - `{bucket_a['canonical_bucket_id']}`")
+        else:
+            # Legacy format
+            st.markdown(f"""
+            **Production Branch:** {st.session_state.get("production_branch_name", "N/A")}
+            **Test Branch:** {st.session_state.get("test_branch_name", "N/A")}
+            **Buckets to Compare:** {len(st.session_state.get("bucket_ids_to_compare", []))}
+            """)
 
     st.markdown("---")
 

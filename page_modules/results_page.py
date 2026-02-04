@@ -112,20 +112,36 @@ def create_results_page():
 
         elif comparison_mode == "buckets":
             st.markdown("**Comparison Mode:** Bucket Comparison")
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("**Production Branch:**")
-                st.text(f"Name: {st.session_state.get('production_branch_name')}")
-                st.text(f"ID: {st.session_state.get('production_branch_id')}")
-            with col2:
-                st.markdown("**Test Branch:**")
-                st.text(f"Name: {st.session_state.get('test_branch_name')}")
-                st.text(f"ID: {st.session_state.get('test_branch_id')}")
+            bucket_pairs = st.session_state.get("bucket_pairs", [])
+            if bucket_pairs:
+                # New URL-based format
+                st.markdown(f"**Bucket Pairs Compared:** {len(bucket_pairs)}")
+                with st.expander("View bucket pairs"):
+                    for idx, pair in enumerate(bucket_pairs):
+                        bucket_a = pair["bucket_a"]
+                        bucket_b = pair["bucket_b"]
+                        branch_a = f"Branch {bucket_a['branch_id']}" if bucket_a["branch_id"] else "Production"
+                        branch_b = f"Branch {bucket_b['branch_id']}" if bucket_b["branch_id"] else "Production"
+                        st.markdown(f"**Pair {idx + 1}:**")
+                        st.text(f"  🔵 {branch_a}: {bucket_a['canonical_bucket_id']}")
+                        st.text(f"  🟢 {branch_b}: {bucket_b['canonical_bucket_id']}")
+            else:
+                # Legacy format fallback
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown("**Production Branch:**")
+                    st.text(f"Name: {st.session_state.get('production_branch_name')}")
+                    st.text(f"ID: {st.session_state.get('production_branch_id')}")
+                with col2:
+                    st.markdown("**Test Branch:**")
+                    st.text(f"Name: {st.session_state.get('test_branch_name')}")
+                    st.text(f"ID: {st.session_state.get('test_branch_id')}")
 
-            st.markdown(f"**Buckets Compared:** {len(st.session_state.get('bucket_ids_to_compare', []))}")
-            with st.expander("View bucket list"):
-                for bucket_id in st.session_state.get("bucket_ids_to_compare", []):
-                    st.text(f"  • {bucket_id}")
+                bucket_ids = st.session_state.get("bucket_ids_to_compare") or []
+                st.markdown(f"**Buckets Compared:** {len(bucket_ids)}")
+                with st.expander("View bucket list"):
+                    for bucket_id in bucket_ids:
+                        st.text(f"  • {bucket_id}")
 
     st.markdown("---")
 
