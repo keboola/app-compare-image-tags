@@ -638,9 +638,14 @@ class ComparisonEngine:
 
         results = {}
 
+        # Check if workspace is available for SQL comparison
+        use_sql = bool(self.client.workspace_id)
+        if not use_sql:
+            st.info("ℹ️ Using pandas-based comparison (no workspace configured). Row limit applies.")
+
         # Phase 1: Identify tables to compare and collect queries
         tables_to_compare = []  # List of (table_id, meta, queries_dict)
-        all_queries = []  # Flat list of all queries
+        all_queries = []  # Flat list of all queries (only used when use_sql=True)
         query_index_map = {}  # Maps table_id -> (start_idx, end_idx) in all_queries
 
         for table_id, meta in metadata_comparison.items():
@@ -673,36 +678,41 @@ class ComparisonEngine:
                 results[table_id] = {"status": ComparisonStatus.ERROR, "error": f"Invalid table ID format: {table_id}"}
                 continue
 
-            # Build queries for this table
-            try:
-                # Check if explicit table IDs are provided (for bucket pairs mode)
-                table_pair = meta.get("_table_pair", {})
-                prod_table_id = table_pair.get("table_a_id")
-                test_table_id = table_pair.get("table_b_id")
+            # Check if explicit table IDs are provided (for bucket pairs mode)
+            table_pair = meta.get("_table_pair", {})
+            prod_table_id = table_pair.get("table_a_id")
+            test_table_id = table_pair.get("table_b_id")
 
-                queries = self._build_sql_comparison_queries(
-                    table_id, prod_branch, test_branch, meta["columns"]["common"], row_limit,
-                    prod_table_id=prod_table_id, test_table_id=test_table_id,
-                )
+            if use_sql:
+                # Build queries for SQL comparison
+                try:
+                    queries = self._build_sql_comparison_queries(
+                        table_id, prod_branch, test_branch, meta["columns"]["common"], row_limit,
+                        prod_table_id=prod_table_id, test_table_id=test_table_id,
+                    )
 
-                # Track query indices
-                start_idx = len(all_queries)
-                all_queries.extend([
-                    queries["prod_not_in_test"],
-                    queries["test_not_in_prod"],
-                    queries["prod_count"],
-                    queries["test_count"],
-                ])
-                end_idx = len(all_queries)
+                    # Track query indices
+                    start_idx = len(all_queries)
+                    all_queries.extend([
+                        queries["prod_not_in_test"],
+                        queries["test_not_in_prod"],
+                        queries["prod_count"],
+                        queries["test_count"],
+                    ])
+                    end_idx = len(all_queries)
 
-                query_index_map[table_id] = (start_idx, end_idx)
-                tables_to_compare.append((table_id, meta, queries))
+                    query_index_map[table_id] = (start_idx, end_idx)
+                    tables_to_compare.append((table_id, meta, queries, prod_table_id, test_table_id))
 
-            except Exception as e:
-                results[table_id] = {"status": ComparisonStatus.ERROR, "error": f"Failed to build queries: {str(e)}"}
+                except Exception as e:
+                    results[table_id] = {"status": ComparisonStatus.ERROR, "error": f"Failed to build queries: {str(e)}"}
+            else:
+                # For pandas comparison, we don't need queries
+                tables_to_compare.append((table_id, meta, None, prod_table_id, test_table_id))
 
-        # Phase 2: Execute all queries in batch
-        if all_queries:
+        # Phase 2: Execute all SQL queries in batch (only when using SQL)
+        all_results = None
+        if use_sql and all_queries:
             st.write(f"🚀 Executing {len(all_queries)} SQL queries in batch for {len(tables_to_compare)} table(s)...")
             try:
                 all_results = self.client.execute_queries_batch(all_queries)
@@ -711,78 +721,147 @@ class ComparisonEngine:
                 all_results = None
 
         # Phase 3: Process results
-        for table_id, meta, queries in tables_to_compare:
-            start_idx, end_idx = query_index_map[table_id]
-
+        for table_id, meta, queries, prod_table_id, test_table_id in tables_to_compare:
             try:
-                if all_results is not None:
-                    # Use batched results
-                    table_results = all_results[start_idx:end_idx]
-                    comparison = self._process_sql_comparison_results(
-                        table_id,
-                        table_results[0],  # prod_only_df
-                        table_results[1],  # test_only_df
-                        table_results[2],  # prod_count_df
-                        table_results[3],  # test_count_df
-                        meta["primary_keys"]["production"],
-                        queries,
-                    )
-                else:
-                    # Fallback: execute individually
-                    st.write(f"🔍 Comparing `{table_id}` using SQL...")
-                    comparison = self._sql_based_comparison(
-                        table_id,
-                        prod_branch,
-                        test_branch,
-                        meta["primary_keys"]["production"],
-                        meta["columns"]["common"],
-                        row_limit,
-                    )
-
-                # Display status messages
-                if comparison["status"] == ComparisonStatus.MATCH:
-                    st.success(f"✅ Table `{table_id}`: Perfect match ({comparison['production_row_count']:,} rows)")
-                else:
-                    st.warning(f"⚠️ Table `{table_id}`: Found {comparison['differing_rows']:,} difference(s)")
-
-                results[table_id] = comparison
-
-            except Exception as e:
-                # Log SQL comparison failure and try pandas fallback
-                st.warning(f"⚠️ SQL comparison failed for `{table_id}`, using pandas fallback: {str(e)}")
-
-                try:
-                    preview_limit = min(row_limit, self.PREVIEW_ROW_LIMIT)
-                    prod_row_count = meta.get("row_count", {}).get("production", 0)
-                    test_row_count = meta.get("row_count", {}).get("test", 0)
-                    actual_count = max(prod_row_count, test_row_count)
-
-                    if preview_limit < actual_count:
-                        st.warning(
-                            f"⚠️ Data preview limited to {preview_limit:,} rows for `{table_id}`. "
-                            f"Full comparison not possible without workspace (table has {actual_count:,} rows)."
+                if use_sql:
+                    # SQL-based comparison
+                    start_idx, end_idx = query_index_map.get(table_id, (0, 0))
+                    if all_results is not None:
+                        # Use batched results
+                        table_results = all_results[start_idx:end_idx]
+                        comparison = self._process_sql_comparison_results(
+                            table_id,
+                            table_results[0],  # prod_only_df
+                            table_results[1],  # test_only_df
+                            table_results[2],  # prod_count_df
+                            table_results[3],  # test_count_df
+                            meta["primary_keys"]["production"],
+                            queries,
+                        )
+                    else:
+                        # Fallback: execute individually
+                        st.write(f"🔍 Comparing `{table_id}` using SQL...")
+                        comparison = self._sql_based_comparison(
+                            table_id,
+                            prod_branch,
+                            test_branch,
+                            meta["primary_keys"]["production"],
+                            meta["columns"]["common"],
+                            row_limit,
                         )
 
-                    prod_data = self.client.get_table_data_preview(table_id, prod_branch, limit=preview_limit)
-                    test_data = self.client.get_table_data_preview(table_id, test_branch, limit=preview_limit)
-
-                    comparison = self._detailed_dataframe_comparison(
-                        prod_data, test_data, meta["primary_keys"]["production"]
-                    )
-
-                    if preview_limit < actual_count:
-                        comparison["truncation_warning"] = f"Compared {preview_limit:,} of {actual_count:,} rows"
+                    # Display status messages
+                    if comparison["status"] == ComparisonStatus.MATCH:
+                        st.success(f"✅ Table `{table_id}`: Perfect match ({comparison['production_row_count']:,} rows)")
+                    else:
+                        st.warning(f"⚠️ Table `{table_id}`: Found {comparison['differing_rows']:,} difference(s)")
 
                     results[table_id] = comparison
 
-                except Exception as fallback_error:
+                else:
+                    # Pandas-based comparison (no workspace configured)
+                    comparison = self._pandas_based_comparison(
+                        table_id,
+                        prod_branch,
+                        test_branch,
+                        meta,
+                        row_limit,
+                        prod_table_id,
+                        test_table_id,
+                    )
+                    results[table_id] = comparison
+
+            except Exception as e:
+                if use_sql:
+                    # Log SQL comparison failure and try pandas fallback
+                    st.warning(f"⚠️ SQL comparison failed for `{table_id}`, using pandas fallback: {str(e)}")
+
+                    try:
+                        comparison = self._pandas_based_comparison(
+                            table_id,
+                            prod_branch,
+                            test_branch,
+                            meta,
+                            row_limit,
+                            prod_table_id,
+                            test_table_id,
+                        )
+                        results[table_id] = comparison
+
+                    except Exception as fallback_error:
+                        results[table_id] = {
+                            "status": ComparisonStatus.ERROR,
+                            "error": str(fallback_error),
+                            "message": "Failed to compare row data",
+                        }
+                else:
                     results[table_id] = {
                         "status": ComparisonStatus.ERROR,
-                        "error": str(fallback_error),
+                        "error": str(e),
                         "message": "Failed to compare row data",
                     }
 
         return results
+
+    def _pandas_based_comparison(
+        self,
+        table_id: str,
+        prod_branch: Optional[str],
+        test_branch: Optional[str],
+        meta: Dict[str, Any],
+        row_limit: int,
+        prod_table_id: Optional[str] = None,
+        test_table_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Compare row data using pandas DataFrame comparison.
+
+        Args:
+            table_id: Table identifier
+            prod_branch: Production branch ID
+            test_branch: Test branch ID
+            meta: Metadata comparison results for this table
+            row_limit: Maximum rows to compare
+            prod_table_id: Optional explicit production table ID
+            test_table_id: Optional explicit test table ID
+
+        Returns:
+            Comparison results dictionary
+        """
+        preview_limit = min(row_limit, self.PREVIEW_ROW_LIMIT)
+        prod_row_count = meta.get("row_count", {}).get("production", 0)
+        test_row_count = meta.get("row_count", {}).get("test", 0)
+        actual_count = max(prod_row_count, test_row_count)
+
+        if preview_limit < actual_count:
+            st.info(
+                f"ℹ️ Comparing first {preview_limit:,} rows for `{table_id}` "
+                f"(table has {actual_count:,} rows total)."
+            )
+
+        # Use explicit table IDs if provided, otherwise use table_id with branch
+        actual_prod_id = prod_table_id if prod_table_id else table_id
+        actual_test_id = test_table_id if test_table_id else table_id
+        actual_prod_branch = None if prod_table_id else prod_branch
+        actual_test_branch = None if test_table_id else test_branch
+
+        prod_data = self.client.get_table_data_preview(actual_prod_id, actual_prod_branch, limit=preview_limit)
+        test_data = self.client.get_table_data_preview(actual_test_id, actual_test_branch, limit=preview_limit)
+
+        comparison = self._detailed_dataframe_comparison(
+            prod_data, test_data, meta["primary_keys"]["production"]
+        )
+
+        if preview_limit < actual_count:
+            comparison["truncation_warning"] = f"Compared {preview_limit:,} of {actual_count:,} rows"
+
+        # Display status messages
+        if comparison["status"] == ComparisonStatus.MATCH:
+            st.success(f"✅ Table `{table_id}`: Perfect match ({comparison.get('production_row_count', len(prod_data)):,} rows)")
+        else:
+            st.warning(f"⚠️ Table `{table_id}`: Found {comparison.get('differing_rows', 'unknown')} difference(s)")
+
+        return comparison
 
     def _build_sql_comparison_queries(
         self,
@@ -2017,86 +2096,91 @@ class ComparisonEngine:
             }
             st.info("ℹ️ Skipping row comparison: Critical metadata differs")
         else:
-            try:
-                # Get qualified names (default branch)
-                t1_qualified = self.client.get_qualified_table_name(table_id_1, None)
-                t2_qualified = self.client.get_qualified_table_name(table_id_2, None)
+            # Check if workspace is available for SQL comparison
+            use_sql = bool(self.client.workspace_id)
+            if not use_sql:
+                st.info("ℹ️ Using pandas-based comparison (no workspace configured). Row limit applies.")
 
-                common_cols = meta["columns"]["common"]
-
-                column_list = ", ".join([_sanitize_sql_identifier(col) for col in sorted(common_cols)])
-
-                # SQL EXCEPT logic for different tables
-                query_1_not_2 = f"""
-                SELECT {column_list} FROM {t1_qualified}
-                EXCEPT
-                SELECT {column_list} FROM {t2_qualified}
-                LIMIT {self.PREVIEW_ROW_LIMIT}
-                """
-
-                query_2_not_1 = f"""
-                SELECT {column_list} FROM {t2_qualified}
-                EXCEPT
-                SELECT {column_list} FROM {t1_qualified}
-                LIMIT {self.PREVIEW_ROW_LIMIT}
-                """
-
-                df_1_not_2 = self.client.execute_query(query_1_not_2)
-                df_2_not_1 = self.client.execute_query(query_2_not_1)
-
-                # Get counts
-                c1_df = self.client.execute_query(f"SELECT COUNT(*) as c FROM {t1_qualified}")
-                c2_df = self.client.execute_query(f"SELECT COUNT(*) as c FROM {t2_qualified}")
-
-                # Use positional access to avoid column name case sensitivity issues
-                c1 = c1_df.iloc[0, 0] if not c1_df.empty else 0
-                c2 = c2_df.iloc[0, 0] if not c2_df.empty else 0
-
-                total_diffs = len(df_1_not_2) + len(df_2_not_1)
-
-                # Calculate identical_rows with honest reporting
-                pks = meta["primary_keys"]["production"]
-                if pks:
-                    identical_rows = min(c1, c2) - max(len(df_1_not_2), len(df_2_not_1))
-                    identical_rows_note = "Estimated based on row counts"
-                else:
-                    identical_rows = None
-                    identical_rows_note = "Cannot calculate without primary keys"
-
-                res = {
-                    "total_rows_compared": max(c1, c2),
-                    "production_row_count": c1,  # Table 1
-                    "test_row_count": c2,  # Table 2
-                    "differing_rows": total_diffs,
-                    "identical_rows": identical_rows,
-                    "identical_rows_note": identical_rows_note,
-                    "status": ComparisonStatus.MATCH if total_diffs == 0 and c1 == c2 else ComparisonStatus.DIFFER,
-                    "sample_differences": [],
-                }
-
-                if total_diffs > 0:
-                    st.warning(f"⚠️ Found differences in data ({total_diffs} rows sampled)")
-                    if not df_1_not_2.empty:
-                        res["sample_differences"].append(
-                            {"source": f"{table_id_1} only", "rows": f"{len(df_1_not_2)} sampled"}
-                        )
-                    if not df_2_not_1.empty:
-                        res["sample_differences"].append(
-                            {"source": f"{table_id_2} only", "rows": f"{len(df_2_not_1)} sampled"}
-                        )
-                else:
-                    st.success(f"✅ Data matches perfectly ({c1} rows)")
-
-                results["row_differences"] = {virtual_id: res}
-
-            except Exception as e:
-                st.warning(
-                    f"⚠️ SQL comparison failed (likely due to missing Workspace config), attempting Pandas fallback: {str(e)}"
-                )
-
+            if use_sql:
                 try:
-                    # Fallback to pandas using data-preview (no workspace required)
-                    # Note: limit is usually small (100) for preview, but let's try 1000 if API allows
+                    # Get qualified names (default branch)
+                    t1_qualified = self.client.get_qualified_table_name(table_id_1, None)
+                    t2_qualified = self.client.get_qualified_table_name(table_id_2, None)
+
+                    common_cols = meta["columns"]["common"]
+
+                    column_list = ", ".join([_sanitize_sql_identifier(col) for col in sorted(common_cols)])
+
+                    # SQL EXCEPT logic for different tables
+                    query_1_not_2 = f"""
+                    SELECT {column_list} FROM {t1_qualified}
+                    EXCEPT
+                    SELECT {column_list} FROM {t2_qualified}
+                    LIMIT {self.PREVIEW_ROW_LIMIT}
+                    """
+
+                    query_2_not_1 = f"""
+                    SELECT {column_list} FROM {t2_qualified}
+                    EXCEPT
+                    SELECT {column_list} FROM {t1_qualified}
+                    LIMIT {self.PREVIEW_ROW_LIMIT}
+                    """
+
+                    df_1_not_2 = self.client.execute_query(query_1_not_2)
+                    df_2_not_1 = self.client.execute_query(query_2_not_1)
+
+                    # Get counts
+                    c1_df = self.client.execute_query(f"SELECT COUNT(*) as c FROM {t1_qualified}")
+                    c2_df = self.client.execute_query(f"SELECT COUNT(*) as c FROM {t2_qualified}")
+
+                    # Use positional access to avoid column name case sensitivity issues
+                    c1 = c1_df.iloc[0, 0] if not c1_df.empty else 0
+                    c2 = c2_df.iloc[0, 0] if not c2_df.empty else 0
+
+                    total_diffs = len(df_1_not_2) + len(df_2_not_1)
+
+                    # Calculate identical_rows with honest reporting
+                    pks = meta["primary_keys"]["production"]
+                    if pks:
+                        identical_rows = min(c1, c2) - max(len(df_1_not_2), len(df_2_not_1))
+                        identical_rows_note = "Estimated based on row counts"
+                    else:
+                        identical_rows = None
+                        identical_rows_note = "Cannot calculate without primary keys"
+
+                    res = {
+                        "total_rows_compared": max(c1, c2),
+                        "production_row_count": c1,  # Table 1
+                        "test_row_count": c2,  # Table 2
+                        "differing_rows": total_diffs,
+                        "identical_rows": identical_rows,
+                        "identical_rows_note": identical_rows_note,
+                        "status": ComparisonStatus.MATCH if total_diffs == 0 and c1 == c2 else ComparisonStatus.DIFFER,
+                        "sample_differences": [],
+                    }
+
+                    if total_diffs > 0:
+                        st.warning(f"⚠️ Found differences in data ({total_diffs} rows sampled)")
+                        if not df_1_not_2.empty:
+                            res["sample_differences"].append(
+                                {"source": f"{table_id_1} only", "rows": f"{len(df_1_not_2)} sampled"}
+                            )
+                        if not df_2_not_1.empty:
+                            res["sample_differences"].append(
+                                {"source": f"{table_id_2} only", "rows": f"{len(df_2_not_1)} sampled"}
+                            )
+                    else:
+                        st.success(f"✅ Data matches perfectly ({c1} rows)")
+
+                    results["row_differences"] = {virtual_id: res}
+
+                except Exception as e:
+                    st.warning(f"⚠️ SQL comparison failed, attempting Pandas fallback: {str(e)}")
+                    use_sql = False  # Fall through to pandas comparison
+
+            if not use_sql:
+                try:
+                    # Use pandas data-preview comparison (no workspace required)
                     preview_limit = self.PREVIEW_ROW_LIMIT
 
                     # Check for truncation and warn user
@@ -2104,9 +2188,9 @@ class ComparisonEngine:
                     test_row_count = meta.get("row_count", {}).get("test", 0)
                     actual_count = max(prod_row_count, test_row_count)
                     if preview_limit < actual_count:
-                        st.warning(
-                            f"⚠️ Data preview limited to {preview_limit:,} rows. "
-                            f"Full comparison not possible without workspace (tables have up to {actual_count:,} rows)."
+                        st.info(
+                            f"ℹ️ Comparing first {preview_limit:,} rows "
+                            f"(tables have up to {actual_count:,} rows total)."
                         )
 
                     prod_data = self.client.get_table_data_preview(table_id_1, branch_id=None, limit=preview_limit)
@@ -2129,7 +2213,7 @@ class ComparisonEngine:
                         st.warning(f"⚠️ Found differences in data ({diff_rows} rows)")
 
                 except Exception as fallback_e:
-                    st.error(f"❌ Data comparison failed (both SQL and Pandas): {str(fallback_e)}")
+                    st.error(f"❌ Data comparison failed: {str(fallback_e)}")
                     results["row_differences"] = {virtual_id: {"status": ComparisonStatus.ERROR, "error": str(fallback_e)}}
 
         # Generate summary
