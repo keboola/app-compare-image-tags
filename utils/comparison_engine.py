@@ -686,18 +686,27 @@ class ComparisonEngine:
             if use_sql:
                 # Build queries for SQL comparison
                 try:
+                    primary_keys = meta.get("primary_keys", {}).get("production", [])
                     queries = self._build_sql_comparison_queries(
-                        table_id, prod_branch, test_branch, meta["columns"]["common"], row_limit,
-                        prod_table_id=prod_table_id, test_table_id=test_table_id,
+                        table_id, prod_branch, test_branch,
+                        columns=meta["columns"]["common"],
+                        primary_keys=primary_keys,
+                        sample_limit=self.SAMPLE_DISPLAY_LIMIT * 20,  # Get more samples for processing
+                        prod_table_id=prod_table_id,
+                        test_table_id=test_table_id,
                     )
 
-                    # Track query indices
+                    # Track query indices - 8 queries per table
                     start_idx = len(all_queries)
                     all_queries.extend([
-                        queries["prod_not_in_test"],
-                        queries["test_not_in_prod"],
-                        queries["prod_count"],
-                        queries["test_count"],
+                        queries["prod_count"],           # 0
+                        queries["test_count"],           # 1
+                        queries["prod_only_pks_count"],  # 2
+                        queries["test_only_pks_count"],  # 3
+                        queries["value_changes_count"],  # 4
+                        queries["value_changes_sample"], # 5
+                        queries["prod_only_sample"],     # 6
+                        queries["test_only_sample"],     # 7
                     ])
                     end_idx = len(all_queries)
 
@@ -714,8 +723,29 @@ class ComparisonEngine:
         all_results = None
         if use_sql and all_queries:
             st.write(f"🚀 Executing {len(all_queries)} SQL queries in batch for {len(tables_to_compare)} table(s)...")
+            # Debug: Show first table's queries
+            if tables_to_compare:
+                first_table_queries = tables_to_compare[0][2]
+                if first_table_queries:
+                    with st.expander("🔍 Debug: SQL Queries for first table"):
+                        for name, query in first_table_queries.items():
+                            st.code(query, language="sql")
+
+            # Debug: Show first COUNT query for testing
+            st.write(f"**Debug: First query:** `{all_queries[0][:100]}...`")
+
             try:
+                # Query Service API always uses production/default branch ID
+                # (workspace has visibility to all buckets regardless of their branch prefix)
                 all_results = self.client.execute_queries_batch(all_queries)
+
+                # Debug: Show first result
+                if all_results:
+                    st.write(f"**Debug: First result (prod_count):** DataFrame shape={all_results[0].shape}")
+                    if not all_results[0].empty:
+                        st.write(f"**Debug: First result value:** {all_results[0].iloc[0, 0]}")
+                    else:
+                        st.warning("**Debug: First result is EMPTY DataFrame!**")
             except Exception as batch_error:
                 st.warning(f"⚠️ Batch SQL execution failed: {str(batch_error)}. Falling back to individual queries...")
                 all_results = None
@@ -727,16 +757,36 @@ class ComparisonEngine:
                     # SQL-based comparison
                     start_idx, end_idx = query_index_map.get(table_id, (0, 0))
                     if all_results is not None:
-                        # Use batched results
+                        # Use batched results - 8 queries per table
                         table_results = all_results[start_idx:end_idx]
+
+                        # Debug: Show query results (using st.write so it persists)
+                        st.write(f"**🔍 Debug SQL Results for `{table_id}`:**")
+                        st.write(f"- prod_count: {table_results[0].iloc[0, 0] if not table_results[0].empty else 'empty'}")
+                        st.write(f"- test_count: {table_results[1].iloc[0, 0] if not table_results[1].empty else 'empty'}")
+                        st.write(f"- prod_only_pks_count: {table_results[2].iloc[0, 0] if not table_results[2].empty else 'empty'}")
+                        st.write(f"- test_only_pks_count: {table_results[3].iloc[0, 0] if not table_results[3].empty else 'empty'}")
+                        st.write(f"- **value_changes_count: {table_results[4].iloc[0, 0] if not table_results[4].empty else 'empty'}**")
+                        st.write(f"- value_changes_sample rows: {len(table_results[5])}")
+                        st.write(f"- prod_only_sample rows: {len(table_results[6])}")
+                        st.write(f"- test_only_sample rows: {len(table_results[7])}")
+                        # Debug: Show sample DataFrame details
+                        if not table_results[5].empty:
+                            st.write(f"- value_changes_sample columns: {list(table_results[5].columns)}")
+                            st.write(f"- value_changes_sample first row: {table_results[5].iloc[0].to_dict()}")
+
                         comparison = self._process_sql_comparison_results(
                             table_id,
-                            table_results[0],  # prod_only_df
-                            table_results[1],  # test_only_df
-                            table_results[2],  # prod_count_df
-                            table_results[3],  # test_count_df
-                            meta["primary_keys"]["production"],
-                            queries,
+                            prod_count_df=table_results[0],
+                            test_count_df=table_results[1],
+                            prod_only_count_df=table_results[2],
+                            test_only_count_df=table_results[3],
+                            value_changes_count_df=table_results[4],
+                            value_changes_sample_df=table_results[5],
+                            prod_only_sample_df=table_results[6],
+                            test_only_sample_df=table_results[7],
+                            primary_keys=meta["primary_keys"]["production"],
+                            queries=queries,
                         )
                     else:
                         # Fallback: execute individually
@@ -747,7 +797,6 @@ class ComparisonEngine:
                             test_branch,
                             meta["primary_keys"]["production"],
                             meta["columns"]["common"],
-                            row_limit,
                         )
 
                     # Display status messages
@@ -869,19 +918,25 @@ class ComparisonEngine:
         prod_branch: Optional[str],
         test_branch: Optional[str],
         columns: List[str],
-        row_limit: int,
+        primary_keys: List[str],
+        sample_limit: int = 100,
         prod_table_id: Optional[str] = None,
         test_table_id: Optional[str] = None,
     ) -> Dict[str, str]:
         """
         Build SQL queries for table comparison without executing them.
 
+        Uses PK-based comparison when primary keys are available:
+        - EXCEPT on PKs to find rows unique to each table
+        - JOIN + HASH to find rows with same PK but different values
+
         Args:
             table_id: Table ID to compare (used when prod/test_table_id not provided)
             prod_branch: Production branch ID
             test_branch: Test branch ID
             columns: List of common columns to compare
-            row_limit: Maximum rows to compare
+            primary_keys: List of primary key columns
+            sample_limit: Maximum rows to return for sample display (default 100)
             prod_table_id: Optional explicit production table ID (for bucket pairs)
             test_table_id: Optional explicit test table ID (for bucket pairs)
 
@@ -899,71 +954,190 @@ class ComparisonEngine:
         else:
             test_table = self.client.get_qualified_table_name(table_id, test_branch)
 
-        # Build column list (sorted for consistency) with sanitization
-        column_list = ", ".join([_sanitize_sql_identifier(col) for col in sorted(columns)])
+        # Build column lists with sanitization
+        all_columns_sorted = sorted(columns)
+        all_cols_list = ", ".join([_sanitize_sql_identifier(col) for col in all_columns_sorted])
 
-        return {
-            "prod_not_in_test": f"""
-                SELECT {column_list}
-                FROM {prod_table}
-                EXCEPT
-                SELECT {column_list}
-                FROM {test_table}
-                LIMIT {row_limit}
-            """,
-            "test_not_in_prod": f"""
-                SELECT {column_list}
-                FROM {test_table}
-                EXCEPT
-                SELECT {column_list}
-                FROM {prod_table}
-                LIMIT {row_limit}
-            """,
+        # Sanitized PK columns
+        pk_cols_sanitized = [_sanitize_sql_identifier(pk) for pk in primary_keys]
+        pk_list = ", ".join(pk_cols_sanitized)
+
+        # Non-PK columns (for value comparison)
+        non_pk_columns = [col for col in all_columns_sorted if col not in primary_keys]
+        non_pk_cols_sanitized = [_sanitize_sql_identifier(col) for col in non_pk_columns]
+
+        # Build JOIN condition on PKs
+        join_conditions = " AND ".join([f"p.{pk} = t.{pk}" for pk in pk_cols_sanitized])
+
+        queries = {
             "prod_count": f"SELECT COUNT(*) as count FROM {prod_table}",
             "test_count": f"SELECT COUNT(*) as count FROM {test_table}",
         }
 
+        if primary_keys and pk_list:
+            # PK-based comparison - more accurate
+
+            # Count PKs only in production (rows removed or not in test)
+            queries["prod_only_pks_count"] = f"""
+                SELECT COUNT(*) as count FROM (
+                    SELECT {pk_list} FROM {prod_table}
+                    EXCEPT
+                    SELECT {pk_list} FROM {test_table}
+                )
+            """
+
+            # Count PKs only in test (rows added or not in prod)
+            queries["test_only_pks_count"] = f"""
+                SELECT COUNT(*) as count FROM (
+                    SELECT {pk_list} FROM {test_table}
+                    EXCEPT
+                    SELECT {pk_list} FROM {prod_table}
+                )
+            """
+
+            # Count rows with same PK but different values (using HASH on non-PK columns)
+            if non_pk_cols_sanitized:
+                prod_hash_cols = ", ".join([f"p.{col}" for col in non_pk_cols_sanitized])
+                test_hash_cols = ", ".join([f"t.{col}" for col in non_pk_cols_sanitized])
+
+                queries["value_changes_count"] = f"""
+                    SELECT COUNT(*) as count FROM {prod_table} p
+                    INNER JOIN {test_table} t ON {join_conditions}
+                    WHERE HASH({prod_hash_cols}) != HASH({test_hash_cols})
+                """
+
+                # Sample of changed rows with both prod and test values for display
+                # Build select list with aliased columns: p.col as prod_col, t.col as test_col
+                pk_select = ", ".join([f"p.{pk} as {pk}" for pk in pk_cols_sanitized])
+                value_select_parts = []
+                for col in non_pk_cols_sanitized:
+                    value_select_parts.append(f"p.{col} as prod_{col.strip('\"')}")
+                    value_select_parts.append(f"t.{col} as test_{col.strip('\"')}")
+                value_select = ", ".join(value_select_parts)
+
+                queries["value_changes_sample"] = f"""
+                    SELECT {pk_select}, {value_select}
+                    FROM {prod_table} p
+                    INNER JOIN {test_table} t ON {join_conditions}
+                    WHERE HASH({prod_hash_cols}) != HASH({test_hash_cols})
+                    LIMIT {sample_limit}
+                """
+            else:
+                # All columns are PKs - no value changes possible, only unique rows
+                queries["value_changes_count"] = "SELECT 0 as count"
+                queries["value_changes_sample"] = f"SELECT {pk_list} FROM {prod_table} WHERE 1=0"
+
+            # Sample of rows only in production
+            queries["prod_only_sample"] = f"""
+                SELECT {all_cols_list} FROM {prod_table}
+                WHERE ({pk_list}) IN (
+                    SELECT {pk_list} FROM {prod_table}
+                    EXCEPT
+                    SELECT {pk_list} FROM {test_table}
+                )
+                LIMIT {sample_limit}
+            """
+
+            # Sample of rows only in test
+            queries["test_only_sample"] = f"""
+                SELECT {all_cols_list} FROM {test_table}
+                WHERE ({pk_list}) IN (
+                    SELECT {pk_list} FROM {test_table}
+                    EXCEPT
+                    SELECT {pk_list} FROM {prod_table}
+                )
+                LIMIT {sample_limit}
+            """
+
+        else:
+            # No PKs - fall back to full row EXCEPT (less accurate, can't distinguish value changes)
+            queries["prod_only_pks_count"] = f"""
+                SELECT COUNT(*) as count FROM (
+                    SELECT {all_cols_list} FROM {prod_table}
+                    EXCEPT
+                    SELECT {all_cols_list} FROM {test_table}
+                )
+            """
+            queries["test_only_pks_count"] = f"""
+                SELECT COUNT(*) as count FROM (
+                    SELECT {all_cols_list} FROM {test_table}
+                    EXCEPT
+                    SELECT {all_cols_list} FROM {prod_table}
+                )
+            """
+            queries["value_changes_count"] = "SELECT 0 as count"
+            queries["value_changes_sample"] = f"SELECT {all_cols_list} FROM {prod_table} WHERE 1=0"
+
+            queries["prod_only_sample"] = f"""
+                SELECT {all_cols_list} FROM {prod_table}
+                EXCEPT
+                SELECT {all_cols_list} FROM {test_table}
+                LIMIT {sample_limit}
+            """
+            queries["test_only_sample"] = f"""
+                SELECT {all_cols_list} FROM {test_table}
+                EXCEPT
+                SELECT {all_cols_list} FROM {prod_table}
+                LIMIT {sample_limit}
+            """
+
+        return queries
+
     def _process_sql_comparison_results(
         self,
         table_id: str,
-        prod_only_df: pd.DataFrame,
-        test_only_df: pd.DataFrame,
         prod_count_df: pd.DataFrame,
         test_count_df: pd.DataFrame,
+        prod_only_count_df: pd.DataFrame,
+        test_only_count_df: pd.DataFrame,
+        value_changes_count_df: pd.DataFrame,
+        value_changes_sample_df: pd.DataFrame,
+        prod_only_sample_df: pd.DataFrame,
+        test_only_sample_df: pd.DataFrame,
         primary_keys: List[str],
         queries: Dict[str, str],
     ) -> Dict[str, Any]:
         """
         Process SQL query results into comparison result dictionary.
 
+        Uses new PK-based query structure:
+        - Separate counts for PKs only in prod/test (unique rows)
+        - Separate count for rows with same PK but different values
+        - Samples for display
+
         Args:
             table_id: Table ID being compared
-            prod_only_df: DataFrame with rows only in production
-            test_only_df: DataFrame with rows only in test
-            prod_count_df: DataFrame with production row count
-            test_count_df: DataFrame with test row count
+            prod_count_df: DataFrame with total production row count
+            test_count_df: DataFrame with total test row count
+            prod_only_count_df: DataFrame with count of PKs only in production
+            test_only_count_df: DataFrame with count of PKs only in test
+            value_changes_count_df: DataFrame with count of rows with same PK but different values
+            value_changes_sample_df: DataFrame with sample of changed rows (prod & test values)
+            prod_only_sample_df: DataFrame with sample of rows only in production
+            test_only_sample_df: DataFrame with sample of rows only in test
             primary_keys: List of primary key columns
             queries: Dictionary of SQL queries used
 
         Returns:
             Comparison results dictionary
         """
-        # Use positional access to avoid column name case sensitivity issues
-        prod_count = prod_count_df.iloc[0, 0] if not prod_count_df.empty else 0
-        test_count = test_count_df.iloc[0, 0] if not test_count_df.empty else 0
+        # Extract counts using positional access to avoid column name case sensitivity issues
+        prod_count = int(prod_count_df.iloc[0, 0]) if not prod_count_df.empty else 0
+        test_count = int(test_count_df.iloc[0, 0]) if not test_count_df.empty else 0
+        prod_only_count = int(prod_only_count_df.iloc[0, 0]) if not prod_only_count_df.empty else 0
+        test_only_count = int(test_only_count_df.iloc[0, 0]) if not test_only_count_df.empty else 0
+        value_changes_count = int(value_changes_count_df.iloc[0, 0]) if not value_changes_count_df.empty else 0
 
-        # Calculate differences
-        prod_only_count = len(prod_only_df)
-        test_only_count = len(test_only_df)
-        total_differences = prod_only_count + test_only_count
+        # Total differences = unique rows + value changes
+        total_differences = prod_only_count + test_only_count + value_changes_count
 
-        # Calculate identical_rows with honest reporting
+        # Calculate identical rows
         if primary_keys:
-            identical_rows = min(prod_count, test_count) - max(prod_only_count, test_only_count)
-            identical_rows_note = "Estimated based on row counts"
+            # Rows that exist in both with same values
+            identical_rows = min(prod_count, test_count) - value_changes_count - max(prod_only_count, test_only_count)
+            identical_rows = max(0, identical_rows)  # Ensure non-negative
         else:
             identical_rows = None
-            identical_rows_note = "Cannot calculate without primary keys"
 
         # Build result
         result = {
@@ -973,17 +1147,13 @@ class ComparisonEngine:
             "test_row_count": test_count,
             "differing_rows": total_differences,
             "identical_rows": identical_rows,
-            "identical_rows_note": identical_rows_note,
+            "rows_with_value_changes": value_changes_count,
             "rows_only_in_production": prod_only_count,
             "rows_only_in_test": test_only_count,
             "sample_differences": [],
+            "column_differences": {},
             "comparison_method": "sql",
-            "sql_queries": {
-                "production_not_in_test": queries["prod_not_in_test"],
-                "test_not_in_production": queries["test_not_in_prod"],
-                "production_count": queries["prod_count"],
-                "test_count": queries["test_count"],
-            },
+            "sql_queries": queries,
         }
 
         # If tables match perfectly
@@ -994,111 +1164,93 @@ class ComparisonEngine:
         # Tables differ
         result["status"] = ComparisonStatus.DIFFER
 
-        # Generate sample differences for display
-        # Match rows by PK to show actual column-level changes (like pandas compare)
-        if not prod_only_df.empty or not test_only_df.empty:
-            if primary_keys and all(pk in prod_only_df.columns for pk in primary_keys):
-                # Index both DataFrames by PK for matching
-                prod_indexed = prod_only_df.set_index(primary_keys) if not prod_only_df.empty else pd.DataFrame()
-                test_indexed = test_only_df.set_index(primary_keys) if not test_only_df.empty else pd.DataFrame()
+        # Process value_changes_sample to extract column-level differences
+        # The sample has columns like: pk1, pk2, prod_col1, test_col1, prod_col2, test_col2, ...
+        column_diff_counts: Dict[str, int] = {}
 
-                # Find PKs that exist in both (these are actual value changes)
-                if not prod_indexed.empty and not test_indexed.empty:
-                    common_pks = prod_indexed.index.intersection(test_indexed.index)
-                    prod_only_pks = prod_indexed.index.difference(test_indexed.index)
-                    test_only_pks = test_indexed.index.difference(prod_indexed.index)
-                else:
-                    common_pks = pd.Index([])
-                    prod_only_pks = prod_indexed.index if not prod_indexed.empty else pd.Index([])
-                    test_only_pks = test_indexed.index if not test_indexed.empty else pd.Index([])
+        if not value_changes_sample_df.empty and primary_keys:
+            sample_count = 0
+            for _, row in value_changes_sample_df.iterrows():
+                if sample_count >= self.SAMPLE_DISPLAY_LIMIT:
+                    break
 
-                # Update counts for truly unique rows vs changed rows
-                result["rows_with_value_changes"] = len(common_pks)
-                result["rows_only_in_production"] = len(prod_only_pks)
-                result["rows_only_in_test"] = len(test_only_pks)
+                # Build PK dict (case-insensitive column matching for Snowflake)
+                pk_dict = {}
+                for pk in primary_keys:
+                    # Find column case-insensitively
+                    pk_col = None
+                    for c in row.index:
+                        if c.lower() == pk.lower():
+                            pk_col = c
+                            break
+                    if pk_col:
+                        pk_dict[pk] = str(row[pk_col])
 
-                # Show column-level differences for rows that exist in both (value changes)
-                sample_count = 0
-                for pk in list(common_pks)[: self.SAMPLE_DISPLAY_LIMIT]:
-                    prod_row = prod_indexed.loc[pk]
-                    test_row = test_indexed.loc[pk]
+                # Find changed columns by comparing prod_X vs test_X pairs
+                # Note: Snowflake may return uppercase column names
+                changed_columns = {}
+                for col in row.index:
+                    col_lower = col.lower()
+                    if col_lower.startswith("prod_"):
+                        base_col = col[5:]  # Remove 'prod_' or 'PROD_' prefix
+                        # Find matching test column (case-insensitive)
+                        test_col = None
+                        for c in row.index:
+                            if c.lower() == f"test_{base_col.lower()}":
+                                test_col = c
+                                break
+                        if test_col in row.index:
+                            prod_val = row[col]
+                            test_val = row[test_col]
+                            # Compare as strings to handle various types
+                            if str(prod_val) != str(test_val):
+                                changed_columns[base_col] = {
+                                    "production": str(prod_val),
+                                    "test": str(test_val),
+                                }
+                                column_diff_counts[base_col] = column_diff_counts.get(base_col, 0) + 1
 
-                    # Build PK dict
-                    if isinstance(pk, tuple):
-                        pk_dict = {k: v for k, v in zip(primary_keys, pk)}
-                    else:
-                        pk_dict = {primary_keys[0]: pk}
+                if changed_columns:
+                    result["sample_differences"].append({
+                        "primary_key": pk_dict,
+                        "source": "value_changed",
+                        "changed_columns": changed_columns,
+                    })
+                    sample_count += 1
 
-                    # Find columns that differ
-                    changed_columns = {}
-                    for col in prod_row.index:
-                        prod_val = prod_row[col]
-                        test_val = test_row[col]
-                        if str(prod_val) != str(test_val):
-                            changed_columns[col] = {
-                                "production": str(prod_val),
-                                "test": str(test_val),
-                            }
+        result["column_differences"] = column_diff_counts
 
-                    if changed_columns:
-                        result["sample_differences"].append(
-                            {
-                                "primary_key": pk_dict,
-                                "source": "value_changed",
-                                "changed_columns": changed_columns,
-                            }
-                        )
-                        sample_count += 1
+        # Add samples of rows only in production
+        remaining_slots = self.SAMPLE_DISPLAY_LIMIT - len(result["sample_differences"])
+        if not prod_only_sample_df.empty and remaining_slots > 0:
+            for _, row in prod_only_sample_df.head(remaining_slots).iterrows():
+                pk_dict = {}
+                if primary_keys:
+                    for pk in primary_keys:
+                        if pk in row.index:
+                            pk_dict[pk] = str(row[pk])
 
-                # Show truly unique rows (only in prod)
-                remaining_slots = self.SAMPLE_DISPLAY_LIMIT - sample_count
-                for pk in list(prod_only_pks)[:remaining_slots]:
-                    prod_row = prod_indexed.loc[pk]
-                    if isinstance(pk, tuple):
-                        pk_dict = {k: v for k, v in zip(primary_keys, pk)}
-                    else:
-                        pk_dict = {primary_keys[0]: pk}
-                    result["sample_differences"].append(
-                        {
-                            "primary_key": pk_dict,
-                            "source": "production_only",
-                            "values": {col: str(prod_row[col]) for col in prod_row.index},
-                        }
-                    )
+                result["sample_differences"].append({
+                    "primary_key": pk_dict,
+                    "source": "production_only",
+                    "values": {str(col): str(row[col]) for col in row.index},
+                })
 
-                # Show truly unique rows (only in test)
-                for pk in list(test_only_pks)[:remaining_slots]:
-                    test_row = test_indexed.loc[pk]
-                    if isinstance(pk, tuple):
-                        pk_dict = {k: v for k, v in zip(primary_keys, pk)}
-                    else:
-                        pk_dict = {primary_keys[0]: pk}
-                    result["sample_differences"].append(
-                        {
-                            "primary_key": pk_dict,
-                            "source": "test_only",
-                            "values": {col: str(test_row[col]) for col in test_row.index},
-                        }
-                    )
+        # Add samples of rows only in test
+        remaining_slots = self.SAMPLE_DISPLAY_LIMIT - len(result["sample_differences"])
+        if not test_only_sample_df.empty and remaining_slots > 0:
+            for _, row in test_only_sample_df.head(remaining_slots).iterrows():
+                pk_dict = {}
+                if primary_keys:
+                    for pk in primary_keys:
+                        if pk in row.index:
+                            pk_dict[pk] = str(row[pk])
 
-            else:
-                # No PKs - can't match rows, just show samples from each side
-                if not prod_only_df.empty:
-                    for _, row in prod_only_df.head(self.SAMPLE_DISPLAY_LIMIT).iterrows():
-                        result["sample_differences"].append(
-                            {
-                                "source": "production_only",
-                                "values": {col: str(row[col]) for col in row.index},
-                            }
-                        )
-                if not test_only_df.empty:
-                    for _, row in test_only_df.head(self.SAMPLE_DISPLAY_LIMIT).iterrows():
-                        result["sample_differences"].append(
-                            {
-                                "source": "test_only",
-                                "values": {col: str(row[col]) for col in row.index},
-                            }
-                        )
+                result["sample_differences"].append({
+                    "primary_key": pk_dict,
+                    "source": "test_only",
+                    "values": {str(col): str(row[col]) for col in row.index},
+                })
 
         return result
 
@@ -1109,12 +1261,12 @@ class ComparisonEngine:
         test_branch: Optional[str],
         primary_keys: List[str],
         columns: List[str],
-        row_limit: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        Compare tables using SQL EXCEPT queries for maximum efficiency.
+        Compare tables using PK-based SQL queries for maximum efficiency.
 
         This method compares tables entirely in the database without loading data to memory.
+        Uses JOIN + HASH for value change detection when PKs are available.
 
         Args:
             table_id: Table ID to compare
@@ -1122,7 +1274,6 @@ class ComparisonEngine:
             test_branch: Test branch ID
             primary_keys: List of primary key columns
             columns: List of common columns to compare
-            row_limit: Maximum rows to compare (reads from session state if None)
 
         Returns:
             Comparison results dictionary
@@ -1131,34 +1282,41 @@ class ComparisonEngine:
         if not _validate_table_id(table_id):
             raise ValueError(f"Invalid table ID format: {table_id}")
 
-        # Read row_limit from session state if not provided, then validate
-        if row_limit is None:
-            row_limit = st.session_state.get("comparison_row_limit", self.DEFAULT_ROW_LIMIT)
-        row_limit = max(1, min(int(row_limit), self.MAX_ROW_LIMIT))
-
-        # Build queries
+        # Build queries with new PK-based structure
         queries = self._build_sql_comparison_queries(
-            table_id, prod_branch, test_branch, columns, row_limit
+            table_id, prod_branch, test_branch,
+            columns=columns,
+            primary_keys=primary_keys,
+            sample_limit=self.SAMPLE_DISPLAY_LIMIT * 20,
         )
 
-        # Execute queries in batch (4 queries at once)
+        # Execute queries in batch (8 queries)
         query_list = [
-            queries["prod_not_in_test"],
-            queries["test_not_in_prod"],
-            queries["prod_count"],
-            queries["test_count"],
+            queries["prod_count"],           # 0
+            queries["test_count"],           # 1
+            queries["prod_only_pks_count"],  # 2
+            queries["test_only_pks_count"],  # 3
+            queries["value_changes_count"],  # 4
+            queries["value_changes_sample"], # 5
+            queries["prod_only_sample"],     # 6
+            queries["test_only_sample"],     # 7
         ]
+        # Query Service API always uses production/default branch ID
         results_list = self.client.execute_queries_batch(query_list)
 
         # Process results using shared method
         result = self._process_sql_comparison_results(
             table_id,
-            results_list[0],  # prod_only_df
-            results_list[1],  # test_only_df
-            results_list[2],  # prod_count_df
-            results_list[3],  # test_count_df
-            primary_keys,
-            queries,
+            prod_count_df=results_list[0],
+            test_count_df=results_list[1],
+            prod_only_count_df=results_list[2],
+            test_only_count_df=results_list[3],
+            value_changes_count_df=results_list[4],
+            value_changes_sample_df=results_list[5],
+            prod_only_sample_df=results_list[6],
+            test_only_sample_df=results_list[7],
+            primary_keys=primary_keys,
+            queries=queries,
         )
 
         # Display status messages
@@ -1246,6 +1404,7 @@ class ComparisonEngine:
                 "total_rows_compared": max(len(df_prod), len(df_test)),
                 "differing_rows": total_differences,
                 "identical_rows": n_common - n_diff_common,
+                "rows_with_value_changes": n_diff_common,
                 "rows_only_in_production": n_prod_only,
                 "rows_only_in_test": n_test_only,
                 "column_differences": {},
@@ -2103,76 +2262,57 @@ class ComparisonEngine:
 
             if use_sql:
                 try:
-                    # Get qualified names (default branch)
-                    t1_qualified = self.client.get_qualified_table_name(table_id_1, None)
-                    t2_qualified = self.client.get_qualified_table_name(table_id_2, None)
-
+                    # Use PK-based SQL comparison (same as bucket comparison)
+                    pks = meta["primary_keys"]["production"]
                     common_cols = meta["columns"]["common"]
 
-                    column_list = ", ".join([_sanitize_sql_identifier(col) for col in sorted(common_cols)])
+                    # Build queries using the shared method
+                    queries = self._build_sql_comparison_queries(
+                        table_id=virtual_id,
+                        prod_branch=None,
+                        test_branch=None,
+                        columns=common_cols,
+                        primary_keys=pks,
+                        sample_limit=self.SAMPLE_DISPLAY_LIMIT * 20,
+                        prod_table_id=table_id_1,
+                        test_table_id=table_id_2,
+                    )
 
-                    # SQL EXCEPT logic for different tables
-                    query_1_not_2 = f"""
-                    SELECT {column_list} FROM {t1_qualified}
-                    EXCEPT
-                    SELECT {column_list} FROM {t2_qualified}
-                    LIMIT {self.PREVIEW_ROW_LIMIT}
-                    """
+                    # Execute queries in batch (8 queries)
+                    query_list = [
+                        queries["prod_count"],           # 0
+                        queries["test_count"],           # 1
+                        queries["prod_only_pks_count"],  # 2
+                        queries["test_only_pks_count"],  # 3
+                        queries["value_changes_count"],  # 4
+                        queries["value_changes_sample"], # 5
+                        queries["prod_only_sample"],     # 6
+                        queries["test_only_sample"],     # 7
+                    ]
+                    results_list = self.client.execute_queries_batch(query_list)
 
-                    query_2_not_1 = f"""
-                    SELECT {column_list} FROM {t2_qualified}
-                    EXCEPT
-                    SELECT {column_list} FROM {t1_qualified}
-                    LIMIT {self.PREVIEW_ROW_LIMIT}
-                    """
+                    # Process results using shared method
+                    comparison = self._process_sql_comparison_results(
+                        virtual_id,
+                        prod_count_df=results_list[0],
+                        test_count_df=results_list[1],
+                        prod_only_count_df=results_list[2],
+                        test_only_count_df=results_list[3],
+                        value_changes_count_df=results_list[4],
+                        value_changes_sample_df=results_list[5],
+                        prod_only_sample_df=results_list[6],
+                        test_only_sample_df=results_list[7],
+                        primary_keys=pks,
+                        queries=queries,
+                    )
 
-                    df_1_not_2 = self.client.execute_query(query_1_not_2)
-                    df_2_not_1 = self.client.execute_query(query_2_not_1)
-
-                    # Get counts
-                    c1_df = self.client.execute_query(f"SELECT COUNT(*) as c FROM {t1_qualified}")
-                    c2_df = self.client.execute_query(f"SELECT COUNT(*) as c FROM {t2_qualified}")
-
-                    # Use positional access to avoid column name case sensitivity issues
-                    c1 = c1_df.iloc[0, 0] if not c1_df.empty else 0
-                    c2 = c2_df.iloc[0, 0] if not c2_df.empty else 0
-
-                    total_diffs = len(df_1_not_2) + len(df_2_not_1)
-
-                    # Calculate identical_rows with honest reporting
-                    pks = meta["primary_keys"]["production"]
-                    if pks:
-                        identical_rows = min(c1, c2) - max(len(df_1_not_2), len(df_2_not_1))
-                        identical_rows_note = "Estimated based on row counts"
+                    # Display status messages
+                    if comparison["status"] == ComparisonStatus.MATCH:
+                        st.success(f"✅ Data matches perfectly ({comparison['production_row_count']:,} rows)")
                     else:
-                        identical_rows = None
-                        identical_rows_note = "Cannot calculate without primary keys"
+                        st.warning(f"⚠️ Found {comparison['differing_rows']:,} difference(s)")
 
-                    res = {
-                        "total_rows_compared": max(c1, c2),
-                        "production_row_count": c1,  # Table 1
-                        "test_row_count": c2,  # Table 2
-                        "differing_rows": total_diffs,
-                        "identical_rows": identical_rows,
-                        "identical_rows_note": identical_rows_note,
-                        "status": ComparisonStatus.MATCH if total_diffs == 0 and c1 == c2 else ComparisonStatus.DIFFER,
-                        "sample_differences": [],
-                    }
-
-                    if total_diffs > 0:
-                        st.warning(f"⚠️ Found differences in data ({total_diffs} rows sampled)")
-                        if not df_1_not_2.empty:
-                            res["sample_differences"].append(
-                                {"source": f"{table_id_1} only", "rows": f"{len(df_1_not_2)} sampled"}
-                            )
-                        if not df_2_not_1.empty:
-                            res["sample_differences"].append(
-                                {"source": f"{table_id_2} only", "rows": f"{len(df_2_not_1)} sampled"}
-                            )
-                    else:
-                        st.success(f"✅ Data matches perfectly ({c1} rows)")
-
-                    results["row_differences"] = {virtual_id: res}
+                    results["row_differences"] = {virtual_id: comparison}
 
                 except Exception as e:
                     st.warning(f"⚠️ SQL comparison failed, attempting Pandas fallback: {str(e)}")

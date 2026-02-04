@@ -233,17 +233,23 @@ def display_row_differences(differences: Dict[str, Any]):
             with st.expander("🔍 View SQL Queries Used", expanded=False):
                 sql_queries = differences["sql_queries"]
 
-                st.markdown("**Query 1: Rows in Production but not in Test**")
-                st.code(sql_queries.get("production_not_in_test", "N/A"), language="sql")
+                st.markdown("**Query 1: Production Row Count**")
+                st.code(sql_queries.get("prod_count", "N/A"), language="sql")
 
-                st.markdown("**Query 2: Rows in Test but not in Production**")
-                st.code(sql_queries.get("test_not_in_production", "N/A"), language="sql")
-
-                st.markdown("**Query 3: Production Row Count**")
-                st.code(sql_queries.get("production_count", "N/A"), language="sql")
-
-                st.markdown("**Query 4: Test Row Count**")
+                st.markdown("**Query 2: Test Row Count**")
                 st.code(sql_queries.get("test_count", "N/A"), language="sql")
+
+                st.markdown("**Query 3: PKs Only in Production (removed/missing rows)**")
+                st.code(sql_queries.get("prod_only_pks_count", "N/A"), language="sql")
+
+                st.markdown("**Query 4: PKs Only in Test (added rows)**")
+                st.code(sql_queries.get("test_only_pks_count", "N/A"), language="sql")
+
+                st.markdown("**Query 5: Value Changes Count (same PK, different values)**")
+                st.code(sql_queries.get("value_changes_count", "N/A"), language="sql")
+
+                st.markdown("**Query 6: Value Changes Sample**")
+                st.code(sql_queries.get("value_changes_sample", "N/A"), language="sql")
     else:
         st.caption("🐼 Compared using pandas DataFrames")
 

@@ -728,7 +728,10 @@ def validate_bucket_comparison(user_token: str, bucket_urls: list, auto_run: boo
                         ws_config_id
                     )
                     workspace_id = str(workspace_data["id"])
-                    st.success(f"✅ Workspace validated: **{workspace_data.get('name', 'Unknown')}**")
+                    st.success(f"✅ Workspace validated: **{workspace_data.get('name', 'Unknown')}** (ID: {workspace_id})")
+                    # Debug: Print workspace details to terminal
+                    print(f"[DEBUG Workspace] ID: {workspace_id}")
+                    print(f"[DEBUG Workspace] Data: {workspace_data}")
                 except ValueError as e:
                     st.error(f"❌ Invalid workspace URL: {str(e)}")
                     return

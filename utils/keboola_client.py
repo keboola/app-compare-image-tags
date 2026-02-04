@@ -1144,7 +1144,8 @@ class KeboolaAPIClient:
 
         # Parse results into DataFrame
         columns = [col.get("name", f"col_{i}") for i, col in enumerate(result_data.get("columns", []))]
-        rows = result_data.get("rows", [])
+        # API returns data in "data" field, not "rows"
+        rows = result_data.get("data", result_data.get("rows", []))
 
         if rows and columns:
             return pd.DataFrame(rows, columns=columns)
@@ -1173,6 +1174,11 @@ class KeboolaAPIClient:
         submit_url = (
             f"{_self.query_service_url}/api/v1/branches/{numeric_branch_id}/workspaces/{_self.workspace_id}/queries"
         )
+
+        # Debug: Show API call details
+        print(f"[DEBUG Query Service] branch_id={numeric_branch_id}, workspace_id={_self.workspace_id}")
+        print(f"[DEBUG Query Service] URL: {submit_url}")
+        print(f"[DEBUG Query Service] First query: {queries[0][:150]}...")
 
         payload = {"statements": queries}
 
@@ -1213,8 +1219,22 @@ class KeboolaAPIClient:
         statements = status_data.get("statements", [])
         results = []
 
+        # Debug: Show all statement statuses
+        print(f"[DEBUG] Job completed with {len(statements)} statements")
+        for i, stmt in enumerate(statements[:3]):  # Show first 3
+            print(f"[DEBUG] Statement {i}: status={stmt.get('status')}, error={stmt.get('error')}")
+
         for i, stmt in enumerate(statements):
             statement_id = stmt.get("id", i)
+            stmt_status = stmt.get("status", "unknown")
+            stmt_error = stmt.get("error", {}).get("message") if stmt.get("error") else None
+
+            # Check if statement failed
+            if stmt_status == "failed" or stmt_error:
+                print(f"[DEBUG] Statement {i} failed: {stmt_error}")
+                results.append(pd.DataFrame())
+                continue
+
             results_url = f"{_self.query_service_url}/api/v1/queries/{query_job_id}/{statement_id}/results"
 
             results_response = requests.get(results_url, headers=headers)
@@ -1222,9 +1242,18 @@ class KeboolaAPIClient:
 
             result_data = results_response.json()
 
+            # Debug: Show raw API response for first statement
+            if i == 0:
+                print(f"[DEBUG] Raw API response for first statement: {result_data}")
+
             # Parse results into DataFrame
             columns = [col.get("name", f"col_{j}") for j, col in enumerate(result_data.get("columns", []))]
-            rows = result_data.get("rows", [])
+            # API returns data in "data" field, not "rows"
+            rows = result_data.get("data", result_data.get("rows", []))
+
+            # Debug: Show first statement result details
+            if i == 0:
+                print(f"[DEBUG] First result: columns={columns}, row_count={len(rows)}, first_row={rows[0] if rows else 'N/A'}")
 
             if rows and columns:
                 results.append(pd.DataFrame(rows, columns=columns))
