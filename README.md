@@ -56,12 +56,12 @@ This tool automates the validation of component upgrades by:
    Edit `.streamlit/secrets.toml` with your Keboola connection details:
    ```toml
    KBC_URL = "https://connection.<region>.<provider>.keboola.com"
-   KBC_WORKSPACE_ID = "your-workspace-id"
    ```
 
    **Important Notes:**
    - Never commit `.streamlit/secrets.toml` to git!
    - **Tokens are provided via UI**: You'll enter your Keboola Storage API token in the app when you use it (not stored in secrets)
+   - **Workspace URL (optional)**: For full SQL-level comparisons, provide your workspace URL in the UI. Without it, comparisons use row limits and in-app comparison (safer for large tables)
    - **Branch Creation**: If your token doesn't have branch creation permissions, you can provide an admin token through the UI when needed (see Execution page)
    - **In production**: The app automatically uses the logged-in user's token from environment variables
 
@@ -71,6 +71,12 @@ This tool automates the validation of component upgrades by:
    ```
 
    The app will open in your browser at `http://localhost:8501`
+
+### Local Tests
+
+Get token to the project https://connection.us-east4.gcp.keboola.com/admin/projects/4214 where test tables are 
+
+Run KBC_TOKEN=__token__ pytest tests/test_functional_scenarios.py
 
 ### Deployment to Keboola
 
@@ -84,11 +90,17 @@ See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for detailed deployment instruction
 2. Enter:
    - **Keboola Storage API Token**: Your personal Keboola token for accessing configurations
    - **Configuration ID or URL**: The full URL or just the ID of your existing production configuration
+   - **Workspace URL (Optional)**: Your Keboola workspace URL for full SQL-level comparisons. Without it, comparisons are limited by row count.
    - **Production Image Tag**: Current/production image tag (default: "latest")
    - **Test Image Tag**: The new image tag you want to test (e.g., "2.0.0")
    - **Development Branch Name**: Optional name for the test branch (default: "comparison-test")
 3. Click **Validate Configuration**
 4. Once validated, proceed to the Execution page
+
+**Finding Your Workspace URL:**
+1. Go to Keboola → Workspaces
+2. Open your workspace
+3. Copy the URL from your browser (e.g., `https://connection.keboola.com/admin/projects/12345/workspaces/01kg...`)
 
 ### Step 2: Execution & Monitoring
 
@@ -183,9 +195,10 @@ For API usage examples, see [docs/API_REFERENCE.md](docs/API_REFERENCE.md).
 - Verify the Development Branches feature is enabled for your project (it's in public beta)
 
 ### "Workspace query failed"
-- Ensure `KBC_WORKSPACE_ID` is correctly configured
-- Verify the workspace exists and is accessible
+- Ensure you've provided a valid Workspace URL in the input form
+- Verify the workspace exists and is accessible with your token
 - Check that tables exist in the specified branches
+- **Without Workspace URL**: Comparisons will use row limits and in-app comparison (safer for large tables but may not compare all data)
 
 ### Jobs stuck in "waiting" status
 - This is normal for queued jobs; wait for available workers

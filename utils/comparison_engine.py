@@ -8,15 +8,78 @@ This module implements comprehensive comparison logic across multiple levels:
 - Row-level comparison (actual data differences)
 """
 
-from typing import Dict, List, Optional, Any
+import logging
+import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from enum import Enum
+from typing import Any, Dict, List, Optional, Tuple
+
 import pandas as pd
+import requests
 import streamlit as st
 
 from .keboola_client import KeboolaAPIClient
 
+logger = logging.getLogger(__name__)
+
+
+class ComparisonStatus(str, Enum):
+    """Status enum for comparison results."""
+
+    MATCH = "match"
+    DIFFER = "differ"
+    SKIPPED = "skipped"
+    ERROR = "error"
+
+
+def _sanitize_sql_identifier(name: str) -> str:
+    """Validate and quote SQL identifier to prevent injection."""
+    if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", name):
+        # For identifiers with special chars, escape internal quotes
+        escaped = name.replace('"', '""')
+        return f'"{escaped}"'
+    return f'"{name}"'
+
+
+def _validate_table_id(table_id: str) -> bool:
+    """Validate table ID format."""
+    return bool(re.match(r"^(in|out)\.c-[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+$", table_id))
+
+
+def _normalize_bucket_id(bucket_id: str) -> str:
+    """
+    Normalize a bucket ID by stripping any embedded branch ID.
+
+    Bucket IDs from dev branches have the format: {stage}.c-{branch_id}-{bucket_name}
+    This function returns the canonical form: {stage}.c-{bucket_name}
+
+    Args:
+        bucket_id: Bucket ID that may contain an embedded branch ID
+
+    Returns:
+        Canonical bucket ID without branch ID prefix
+    """
+    # Pattern: in.c-{numeric_branch_id}-{rest} or out.c-{numeric_branch_id}-{rest}
+    # Example: in.c-27406-keboola-ex-instagram -> in.c-keboola-ex-instagram
+    match = re.match(r"^(in|out)\.c-(\d+)-(.+)$", bucket_id)
+    if match:
+        stage = match.group(1)
+        # branch_id = match.group(2)  # Not needed, we're stripping it
+        bucket_name = match.group(3)
+        return f"{stage}.c-{bucket_name}"
+    # Already canonical or unexpected format - return as-is
+    return bucket_id
+
 
 class ComparisonEngine:
     """Executes bucket, table, metadata, and row-level comparisons."""
+
+    # Configuration constants
+    DEFAULT_ROW_LIMIT = 1000
+    MAX_ROW_LIMIT = 100_000
+    PREVIEW_ROW_LIMIT = 1_000
+    SAMPLE_DISPLAY_LIMIT = 5
+    SAMPLE_DIFF_LIMIT = 10
 
     def __init__(self, client: KeboolaAPIClient):
         """
@@ -28,9 +91,7 @@ class ComparisonEngine:
         self.client = client
 
     def compare_outputs(
-        self,
-        production_branch: Optional[str] = None,
-        test_branch_id: Optional[str] = None
+        self, production_branch: Optional[str] = None, test_branch_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Execute full comparison workflow across all levels.
@@ -54,46 +115,48 @@ class ComparisonEngine:
         # Level 1: Bucket comparison
         st.markdown("---")
         st.markdown("## Step 1: Bucket Comparison")
-        results['bucket_comparison'] = self._compare_buckets(
-            production_branch, test_branch_id
-        )
+        results["bucket_comparison"] = self._compare_buckets(production_branch, test_branch_id)
 
         # Level 2: Table comparison
         st.markdown("---")
         st.markdown("## Step 2: Table Comparison")
-        results['table_comparison'] = self._compare_tables(
-            production_branch, test_branch_id, results['bucket_comparison']
+        results["table_comparison"] = self._compare_tables(
+            production_branch, test_branch_id, results["bucket_comparison"]
         )
 
         # Level 3: Metadata comparison
         st.markdown("---")
         st.markdown("## Step 3: Metadata Comparison")
-        results['metadata_comparison'] = self._compare_metadata(
-            production_branch, test_branch_id, results['table_comparison']
+        results["metadata_comparison"] = self._compare_metadata(
+            production_branch, test_branch_id, results["table_comparison"]
         )
 
         # Level 4: Row-level comparison
         st.markdown("---")
         st.markdown("## Step 4: Row-Level Data Comparison")
-        results['row_differences'] = self._compare_row_data(
-            production_branch, test_branch_id, results['metadata_comparison']
+        results["row_differences"] = self._compare_row_data(
+            production_branch, test_branch_id, results["metadata_comparison"]
         )
+
+        # Level 5: Job logs comparison (only for config mode)
+        if st.session_state.get("comparison_mode") == "config":
+            st.markdown("---")
+            st.markdown("## Step 5: Job Logs Comparison")
+            results["log_comparison"] = self._compare_job_logs()
+        else:
+            results["log_comparison"] = None
 
         # Generate summary
         st.markdown("---")
         st.markdown("## 📊 Generating Summary")
-        results['summary'] = self._generate_summary(results)
+        results["summary"] = self._generate_summary(results)
 
         st.markdown("---")
         st.success("✅ Comparison complete!")
 
         return results
 
-    def _compare_buckets(
-        self,
-        prod_branch: Optional[str],
-        test_branch: Optional[str]
-    ) -> Dict[str, Any]:
+    def _compare_buckets(self, prod_branch: Optional[str], test_branch: Optional[str]) -> Dict[str, Any]:
         """
         Compare buckets between branches.
 
@@ -158,23 +221,20 @@ class ComparisonEngine:
                         st.text(f"  🟢 {bucket}")
 
         return {
-            'production_only': prod_only,
-            'test_only': test_only,
-            'common': common,
-            'status': 'match' if prod_buckets == test_buckets else 'differ',
-            '_debug': {
-                'production_buckets': sorted(prod_buckets),
-                'test_buckets': sorted(test_buckets),
-                'production_branch_id': prod_branch,
-                'test_branch_id': test_branch
-            }
+            "production_only": prod_only,
+            "test_only": test_only,
+            "common": common,
+            "status": ComparisonStatus.MATCH if prod_buckets == test_buckets else ComparisonStatus.DIFFER,
+            "_debug": {
+                "production_buckets": sorted(prod_buckets),
+                "test_buckets": sorted(test_buckets),
+                "production_branch_id": prod_branch,
+                "test_branch_id": test_branch,
+            },
         }
 
     def _compare_tables(
-        self,
-        prod_branch: Optional[str],
-        test_branch: Optional[str],
-        bucket_comparison: Dict[str, Any]
+        self, prod_branch: Optional[str], test_branch: Optional[str], bucket_comparison: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
         Compare tables within common buckets.
@@ -189,13 +249,13 @@ class ComparisonEngine:
         """
         st.markdown("### 📊 Table Comparison")
 
-        if not bucket_comparison['common']:
+        if not bucket_comparison["common"]:
             st.warning("⚠️ No common buckets to compare tables")
             return {}
 
         results = {}
 
-        for bucket in bucket_comparison['common']:
+        for bucket in bucket_comparison["common"]:
             st.markdown(f"#### Bucket: `{bucket}`")
 
             prod_tables = set(self.client.list_tables_in_bucket(bucket, prod_branch))
@@ -226,22 +286,47 @@ class ComparisonEngine:
                             st.text(f"  🟢 {table}")
 
             results[bucket] = {
-                'production_only': prod_only,
-                'test_only': test_only,
-                'common': common,
-                'status': 'match' if prod_tables == test_tables else 'differ'
+                "production_only": prod_only,
+                "test_only": test_only,
+                "common": common,
+                "status": ComparisonStatus.MATCH if prod_tables == test_tables else ComparisonStatus.DIFFER,
             }
 
         return results
 
+    def _fetch_table_metadata(
+        self, table_id: str, branch: Optional[str], branch_name: str
+    ) -> Tuple[str, str, Optional[Dict], Optional[str]]:
+        """
+        Fetch metadata for a single table (used for parallel execution).
+
+        Uses thread-safe _get_table_detail_raw() method to avoid Streamlit
+        ScriptRunContext warnings when called from ThreadPoolExecutor.
+
+        Args:
+            table_id: Table ID to fetch
+            branch: Branch ID
+            branch_name: Human-readable branch name (for error messages)
+
+        Returns:
+            Tuple of (table_id, branch_name, metadata_dict or None, error_message or None)
+        """
+        try:
+            # Use thread-safe method (no Streamlit decorators/calls)
+            meta = self.client._get_table_detail_raw(table_id, branch)
+            if not isinstance(meta, dict):
+                return (table_id, branch_name, None, f"Expected dict, got {type(meta)}: {meta}")
+            return (table_id, branch_name, meta, None)
+        except Exception as e:
+            return (table_id, branch_name, None, str(e))
+
     def _compare_metadata(
-        self,
-        prod_branch: Optional[str],
-        test_branch: Optional[str],
-        table_comparison: Dict[str, Any]
+        self, prod_branch: Optional[str], test_branch: Optional[str], table_comparison: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
         Compare table metadata (PKs, columns, types, row counts).
+
+        Uses parallel fetching for improved performance.
 
         Args:
             prod_branch: Production branch ID
@@ -258,179 +343,992 @@ class ComparisonEngine:
             return {}
 
         results = {}
-        total_common_tables = sum(len(comp['common']) for comp in table_comparison.values())
-        st.info(f"Comparing metadata for {total_common_tables} common table(s)...")
 
+        # Collect all table IDs to compare
+        table_ids = []
         for bucket, comparison in table_comparison.items():
-            for table in comparison['common']:
-                table_id = f"{bucket}.{table}"
+            for table in comparison["common"]:
+                table_ids.append(f"{bucket}.{table}")
 
+        total_common_tables = len(table_ids)
+        st.info(f"Comparing metadata for {total_common_tables} common table(s) in parallel...")
+
+        # Phase 1: Fetch all metadata in parallel
+        metadata_cache: Dict[str, Dict[str, Any]] = {}  # table_id -> {"prod": meta, "test": meta}
+        fetch_errors: Dict[str, str] = {}
+
+        # Use ThreadPoolExecutor to fetch all table metadata in parallel
+        # Each table needs 2 fetches (prod and test), so we create tasks for all
+        max_workers = min(20, total_common_tables * 2)  # Cap at 20 concurrent requests
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {}
+
+            # Submit all fetch tasks
+            for table_id in table_ids:
+                # Fetch production metadata
+                future_prod = executor.submit(
+                    self._fetch_table_metadata, table_id, prod_branch, "production"
+                )
+                futures[future_prod] = (table_id, "prod")
+
+                # Fetch test metadata
+                future_test = executor.submit(
+                    self._fetch_table_metadata, table_id, test_branch, "test"
+                )
+                futures[future_test] = (table_id, "test")
+
+            # Collect results as they complete
+            for future in as_completed(futures):
+                table_id, branch_type = futures[future]
                 try:
-                    prod_meta = self.client.get_table_detail(table_id, prod_branch)
-                    test_meta = self.client.get_table_detail(table_id, test_branch)
+                    _, _, meta, error = future.result()
+                    if table_id not in metadata_cache:
+                        metadata_cache[table_id] = {}
 
-                    # Debug: Check what we got back
-                    if not isinstance(prod_meta, dict):
-                        st.error(f"❌ Production metadata for {table_id} is not a dict: {type(prod_meta)}")
-                        st.write("Production metadata:", prod_meta)
-                        raise ValueError(f"Expected dict, got {type(prod_meta)}: {prod_meta}")
-
-                    if not isinstance(test_meta, dict):
-                        st.error(f"❌ Test metadata for {table_id} is not a dict: {type(test_meta)}")
-                        st.write("Test metadata:", test_meta)
-                        raise ValueError(f"Expected dict, got {type(test_meta)}: {test_meta}")
-
-                    pk_comparison = self._compare_primary_keys(prod_meta, test_meta)
-                    col_comparison = self._compare_columns(prod_meta, test_meta)
-                    type_comparison = self._compare_data_types(prod_meta, test_meta)
-                    count_comparison = self._compare_row_counts(prod_meta, test_meta)
-
-                    # Determine overall status
-                    all_match = (
-                        pk_comparison['match'] and
-                        col_comparison['match'] and
-                        type_comparison['match'] and
-                        count_comparison['match']
-                    )
-
-                    results[table_id] = {
-                        'primary_keys': pk_comparison,
-                        'columns': col_comparison,
-                        'data_types': type_comparison,
-                        'row_count': count_comparison,
-                        'status': 'match' if all_match else 'differ'
-                    }
-
-                    # Show success for this table
-                    if all_match:
-                        st.success(f"✅ Table `{table_id}`: All metadata matches")
+                    if error:
+                        fetch_errors[f"{table_id}_{branch_type}"] = error
                     else:
-                        st.warning(f"⚠️ Table `{table_id}`: Metadata differences found")
-
+                        metadata_cache[table_id][branch_type] = meta
                 except Exception as e:
-                    st.error(f"❌ Error comparing metadata for table `{table_id}`: {str(e)}")
-                    results[table_id] = {
-                        'status': 'error',
-                        'error': str(e)
-                    }
+                    fetch_errors[f"{table_id}_{branch_type}"] = str(e)
+
+        # Phase 2: Process results
+        for table_id in table_ids:
+            cache_entry = metadata_cache.get(table_id, {})
+            prod_meta = cache_entry.get("prod")
+            test_meta = cache_entry.get("test")
+
+            # Check for fetch errors
+            prod_error = fetch_errors.get(f"{table_id}_prod")
+            test_error = fetch_errors.get(f"{table_id}_test")
+
+            if prod_error or test_error:
+                error_msg = f"Fetch errors - "
+                if prod_error:
+                    error_msg += f"prod: {prod_error}"
+                if test_error:
+                    error_msg += f"{', ' if prod_error else ''}test: {test_error}"
+                st.error(f"❌ Error fetching metadata for table `{table_id}`: {error_msg}")
+                results[table_id] = {"status": ComparisonStatus.ERROR, "error": error_msg}
+                continue
+
+            if not prod_meta or not test_meta:
+                st.error(f"❌ Missing metadata for table `{table_id}`")
+                results[table_id] = {"status": ComparisonStatus.ERROR, "error": "Missing metadata"}
+                continue
+
+            try:
+                pk_comparison = self._compare_primary_keys(prod_meta, test_meta)
+                col_comparison = self._compare_columns(prod_meta, test_meta)
+                type_comparison = self._compare_data_types(prod_meta, test_meta)
+                count_comparison = self._compare_row_counts(prod_meta, test_meta)
+
+                # Determine overall status
+                all_match = (
+                    pk_comparison["match"]
+                    and col_comparison["match"]
+                    and type_comparison["match"]
+                    and count_comparison["match"]
+                )
+
+                results[table_id] = {
+                    "primary_keys": pk_comparison,
+                    "columns": col_comparison,
+                    "data_types": type_comparison,
+                    "row_count": count_comparison,
+                    "status": ComparisonStatus.MATCH if all_match else ComparisonStatus.DIFFER,
+                }
+
+                # Show detailed success/warning for this table
+                if all_match:
+                    st.success(f"✅ Table `{table_id}`: All metadata matches")
+                else:
+                    # Create detailed mismatch message
+                    mismatch_details = []
+                    if not pk_comparison["match"]:
+                        prod_pks = pk_comparison["production"]
+                        test_pks = pk_comparison["test"]
+                        mismatch_details.append(f"Primary Keys differ (prod: {prod_pks}, test: {test_pks})")
+                    if not col_comparison["match"]:
+                        prod_only = col_comparison.get("production_only", [])
+                        test_only = col_comparison.get("test_only", [])
+                        if prod_only:
+                            mismatch_details.append(f"Columns only in prod: {prod_only}")
+                        if test_only:
+                            mismatch_details.append(f"Columns only in test: {test_only}")
+                    if not type_comparison["match"]:
+                        type_diffs = type_comparison.get("differences", {})
+                        mismatch_details.append(f"Type differences in {len(type_diffs)} column(s)")
+                    if not count_comparison["match"]:
+                        mismatch_details.append(
+                            f"Row count differs (prod: {count_comparison['production']}, test: {count_comparison['test']})"
+                        )
+
+                    st.warning(f"⚠️ Table `{table_id}`: {'; '.join(mismatch_details)}")
+
+            except Exception as e:
+                st.error(f"❌ Error comparing metadata for table `{table_id}`: {str(e)}")
+                results[table_id] = {"status": ComparisonStatus.ERROR, "error": str(e)}
 
         return results
 
     def _compare_primary_keys(self, prod_meta: Dict, test_meta: Dict) -> Dict[str, Any]:
         """Compare primary keys."""
-        prod_pks = prod_meta.get('primaryKey', [])
-        test_pks = test_meta.get('primaryKey', [])
+        # Handle None values explicitly
+        prod_pks = prod_meta.get("primaryKey") or []
+        test_pks = test_meta.get("primaryKey") or []
+
+        # Ensure we're comparing lists (handle any unexpected data types)
+        if not isinstance(prod_pks, list):
+            prod_pks = [prod_pks] if prod_pks else []
+        if not isinstance(test_pks, list):
+            test_pks = [test_pks] if test_pks else []
+
+        # Compare as sorted lists to handle order differences
+        matches = sorted(prod_pks) == sorted(test_pks)
 
         return {
-            'match': prod_pks == test_pks,
-            'production': prod_pks,
-            'test': test_pks
+            "match": matches,
+            "production": prod_pks,
+            "test": test_pks,
+            "production_sorted": sorted(prod_pks),
+            "test_sorted": sorted(test_pks),
         }
 
     def _compare_columns(self, prod_meta: Dict, test_meta: Dict) -> Dict[str, Any]:
         """Compare column names."""
-        prod_cols = set([col['name'] for col in prod_meta.get('columns', [])])
-        test_cols = set([col['name'] for col in test_meta.get('columns', [])])
+        # Extract column names safely
+        prod_columns = prod_meta.get("columns", [])
+        test_columns = test_meta.get("columns", [])
+
+        # Handle edge cases where columns might not be a list
+        if not isinstance(prod_columns, list):
+            prod_columns = []
+        if not isinstance(test_columns, list):
+            test_columns = []
+
+        # Get column names (handle both string and dict formats)
+        prod_cols = set()
+
+        # Prefer definition.columns if available (as per user hint)
+        if "definition" in prod_meta and "columns" in prod_meta["definition"]:
+            for col in prod_meta["definition"]["columns"]:
+                prod_cols.add(col.get("name", ""))
+        else:
+            for col in prod_columns:
+                if isinstance(col, dict):
+                    prod_cols.add(col.get("name", ""))
+                elif isinstance(col, str):
+                    prod_cols.add(col)
+
+        test_cols = set()
+        if "definition" in test_meta and "columns" in test_meta["definition"]:
+            for col in test_meta["definition"]["columns"]:
+                test_cols.add(col.get("name", ""))
+        else:
+            for col in test_columns:
+                if isinstance(col, dict):
+                    test_cols.add(col.get("name", ""))
+                elif isinstance(col, str):
+                    test_cols.add(col)
+
+        # Remove empty strings if any
+        prod_cols.discard("")
+        test_cols.discard("")
 
         return {
-            'match': prod_cols == test_cols,
-            'production_only': sorted(prod_cols - test_cols),
-            'test_only': sorted(test_cols - prod_cols),
-            'common': sorted(prod_cols & test_cols)
+            "match": prod_cols == test_cols,
+            "production_only": sorted(prod_cols - test_cols),
+            "test_only": sorted(test_cols - prod_cols),
+            "common": sorted(prod_cols & test_cols),
         }
 
     def _compare_data_types(self, prod_meta: Dict, test_meta: Dict) -> Dict[str, Any]:
         """Compare data types for common columns."""
-        prod_types = {col['name']: col.get('type', 'STRING') for col in prod_meta.get('columns', [])}
-        test_types = {col['name']: col.get('type', 'STRING') for col in test_meta.get('columns', [])}
+        # Extract column info safely
+        prod_columns = prod_meta.get("columns", [])
+        test_columns = test_meta.get("columns", [])
 
+        # Handle edge cases
+        if not isinstance(prod_columns, list):
+            prod_columns = []
+        if not isinstance(test_columns, list):
+            test_columns = []
+
+        # Build type dictionaries with safe access
+        prod_types = {}
+
+        # Prefer definition.columns if available
+        if "definition" in prod_meta and "columns" in prod_meta["definition"]:
+            for col in prod_meta["definition"]["columns"]:
+                # Type might be in definition.type or definition.baseType
+                col_name = col.get("name", "")
+                if "definition" in col and "type" in col["definition"]:
+                    prod_types[col_name] = col["definition"]["type"]
+                elif "basetype" in col:
+                    prod_types[col_name] = col["basetype"]
+                else:
+                    prod_types[col_name] = col.get("type", "STRING")
+        else:
+            for col in prod_columns:
+                if isinstance(col, dict) and "name" in col:
+                    prod_types[col["name"]] = col.get("type", "STRING")
+                elif isinstance(col, str):
+                    prod_types[col] = "STRING"
+
+        test_types = {}
+        if "definition" in test_meta and "columns" in test_meta["definition"]:
+            for col in test_meta["definition"]["columns"]:
+                col_name = col.get("name", "")
+                if "definition" in col and "type" in col["definition"]:
+                    test_types[col_name] = col["definition"]["type"]
+                elif "basetype" in col:
+                    test_types[col_name] = col["basetype"]
+                else:
+                    test_types[col_name] = col.get("type", "STRING")
+        else:
+            for col in test_columns:
+                if isinstance(col, dict) and "name" in col:
+                    test_types[col["name"]] = col.get("type", "STRING")
+                elif isinstance(col, str):
+                    test_types[col] = "STRING"
+
+        # Find differences only in common columns
         differences = {}
         for col in set(prod_types.keys()) & set(test_types.keys()):
             if prod_types[col] != test_types[col]:
-                differences[col] = (prod_types[col], test_types[col])
+                differences[col] = {"production": prod_types[col], "test": test_types[col]}
 
-        return {
-            'match': len(differences) == 0,
-            'differences': differences
-        }
+        return {"match": len(differences) == 0, "differences": differences}
 
     def _compare_row_counts(self, prod_meta: Dict, test_meta: Dict) -> Dict[str, Any]:
         """Compare row counts."""
-        prod_count = prod_meta.get('rowsCount', 0)
-        test_count = test_meta.get('rowsCount', 0)
+        prod_count = prod_meta.get("rowsCount", 0)
+        test_count = test_meta.get("rowsCount", 0)
 
-        return {
-            'match': prod_count == test_count,
-            'production': prod_count,
-            'test': test_count
-        }
+        return {"match": prod_count == test_count, "production": prod_count, "test": test_count}
 
     def _compare_row_data(
         self,
         prod_branch: Optional[str],
         test_branch: Optional[str],
         metadata_comparison: Dict[str, Any],
-        row_limit: int = 10000
+        row_limit: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Compare actual row data for tables with matching metadata.
+
+        Uses batched SQL queries for efficiency - collects queries for all tables
+        and executes them in a single batch call.
 
         Args:
             prod_branch: Production branch ID
             test_branch: Test branch ID
             metadata_comparison: Metadata comparison results
-            row_limit: Maximum rows to compare per table
+            row_limit: Maximum rows to compare per table (reads from session state if None)
 
         Returns:
             Row-level difference results per table
         """
+        # Read row_limit from session state if not provided
+        if row_limit is None:
+            row_limit = st.session_state.get("comparison_row_limit", self.DEFAULT_ROW_LIMIT)
+        row_limit = max(1, min(int(row_limit), self.MAX_ROW_LIMIT))
+
         results = {}
+
+        # Check if workspace is available for SQL comparison
+        use_sql = bool(self.client.workspace_id)
+        if not use_sql:
+            st.info("ℹ️ Using pandas-based comparison (no workspace configured). Row limit applies.")
+
+        # Phase 1: Identify tables to compare and collect queries
+        tables_to_compare = []  # List of (table_id, meta, queries_dict)
+        all_queries = []  # Flat list of all queries (only used when use_sql=True)
+        query_index_map = {}  # Maps table_id -> (start_idx, end_idx) in all_queries
 
         for table_id, meta in metadata_comparison.items():
             # Skip if metadata doesn't match or error occurred
-            if meta.get('status') == 'error':
-                results[table_id] = {
-                    'status': 'skipped',
-                    'reason': f"Metadata error: {meta.get('error')}"
-                }
+            if meta.get("status") == ComparisonStatus.ERROR:
+                results[table_id] = {"status": ComparisonStatus.SKIPPED, "reason": f"Metadata error: {meta.get('error')}"}
                 continue
 
-            # Skip if columns don't match
-            if not meta['columns']['match']:
-                results[table_id] = {
-                    'status': 'skipped',
-                    'reason': 'Column mismatch'
-                }
+            # Skip if ANY metadata doesn't match (primary keys, columns, data types)
+            # We explicitly ALLOW row count differences to proceed to row comparison
+            if (
+                not meta.get("primary_keys", {}).get("match", True)
+                or not meta.get("columns", {}).get("match", True)
+                or not meta.get("data_types", {}).get("match", True)
+            ):
+                mismatch_reasons = []
+                if not meta.get("primary_keys", {}).get("match", True):
+                    mismatch_reasons.append("primary keys")
+                if not meta.get("columns", {}).get("match", True):
+                    mismatch_reasons.append("columns")
+                if not meta.get("data_types", {}).get("match", True):
+                    mismatch_reasons.append("data types")
+
+                results[table_id] = {"status": ComparisonStatus.SKIPPED, "reason": f"Metadata mismatch: {', '.join(mismatch_reasons)}"}
+                st.info(f"ℹ️ Skipping row comparison for `{table_id}`: metadata differs ({', '.join(mismatch_reasons)})")
                 continue
+
+            # Validate table ID format
+            if not _validate_table_id(table_id):
+                results[table_id] = {"status": ComparisonStatus.ERROR, "error": f"Invalid table ID format: {table_id}"}
+                continue
+
+            # Check if explicit table IDs are provided (for bucket pairs mode)
+            table_pair = meta.get("_table_pair", {})
+            prod_table_id = table_pair.get("table_a_id")
+            test_table_id = table_pair.get("table_b_id")
+
+            if use_sql:
+                # Build queries for SQL comparison
+                try:
+                    primary_keys = meta.get("primary_keys", {}).get("production", [])
+                    queries = self._build_sql_comparison_queries(
+                        table_id, prod_branch, test_branch,
+                        columns=meta["columns"]["common"],
+                        primary_keys=primary_keys,
+                        sample_limit=self.SAMPLE_DISPLAY_LIMIT * 20,  # Get more samples for processing
+                        prod_table_id=prod_table_id,
+                        test_table_id=test_table_id,
+                    )
+
+                    # Track query indices - 8 queries per table
+                    start_idx = len(all_queries)
+                    all_queries.extend([
+                        queries["prod_count"],           # 0
+                        queries["test_count"],           # 1
+                        queries["prod_only_pks_count"],  # 2
+                        queries["test_only_pks_count"],  # 3
+                        queries["value_changes_count"],  # 4
+                        queries["value_changes_sample"], # 5
+                        queries["prod_only_sample"],     # 6
+                        queries["test_only_sample"],     # 7
+                    ])
+                    end_idx = len(all_queries)
+
+                    query_index_map[table_id] = (start_idx, end_idx)
+                    tables_to_compare.append((table_id, meta, queries, prod_table_id, test_table_id))
+
+                except Exception as e:
+                    results[table_id] = {"status": ComparisonStatus.ERROR, "error": f"Failed to build queries: {str(e)}"}
+            else:
+                # For pandas comparison, we don't need queries
+                tables_to_compare.append((table_id, meta, None, prod_table_id, test_table_id))
+
+        # Phase 2: Execute all SQL queries in batch (only when using SQL)
+        all_results = None
+        if use_sql and all_queries:
+            st.write(f"🚀 Executing {len(all_queries)} SQL queries in batch for {len(tables_to_compare)} table(s)...")
+            # Debug: Show first table's queries
+            if tables_to_compare:
+                first_table_queries = tables_to_compare[0][2]
+                if first_table_queries:
+                    with st.expander("🔍 Debug: SQL Queries for first table"):
+                        for name, query in first_table_queries.items():
+                            st.code(query, language="sql")
+
+            # Debug: Show first COUNT query for testing
+            st.write(f"**Debug: First query:** `{all_queries[0][:100]}...`")
 
             try:
-                # Load data from both branches
-                prod_data = self.client.query_table_data(table_id, prod_branch, limit=row_limit)
-                test_data = self.client.query_table_data(table_id, test_branch, limit=row_limit)
+                # Query Service API always uses production/default branch ID
+                # (workspace has visibility to all buckets regardless of their branch prefix)
+                all_results = self.client.execute_queries_batch(all_queries)
 
-                # Compare DataFrames
-                comparison = self._detailed_dataframe_comparison(
-                    prod_data,
-                    test_data,
-                    meta['primary_keys']['production']
-                )
+                # Debug: Show first result
+                if all_results:
+                    st.write(f"**Debug: First result (prod_count):** DataFrame shape={all_results[0].shape}")
+                    if not all_results[0].empty:
+                        st.write(f"**Debug: First result value:** {all_results[0].iloc[0, 0]}")
+                    else:
+                        st.warning("**Debug: First result is EMPTY DataFrame!**")
+            except Exception as batch_error:
+                st.warning(f"⚠️ Batch SQL execution failed: {str(batch_error)}. Falling back to individual queries...")
+                all_results = None
 
-                results[table_id] = comparison
+        # Phase 3: Process results
+        for table_id, meta, queries, prod_table_id, test_table_id in tables_to_compare:
+            try:
+                if use_sql:
+                    # SQL-based comparison
+                    start_idx, end_idx = query_index_map.get(table_id, (0, 0))
+                    if all_results is not None:
+                        # Use batched results - 8 queries per table
+                        table_results = all_results[start_idx:end_idx]
+
+                        # Debug: Show query results (using st.write so it persists)
+                        st.write(f"**🔍 Debug SQL Results for `{table_id}`:**")
+                        st.write(f"- prod_count: {table_results[0].iloc[0, 0] if not table_results[0].empty else 'empty'}")
+                        st.write(f"- test_count: {table_results[1].iloc[0, 0] if not table_results[1].empty else 'empty'}")
+                        st.write(f"- prod_only_pks_count: {table_results[2].iloc[0, 0] if not table_results[2].empty else 'empty'}")
+                        st.write(f"- test_only_pks_count: {table_results[3].iloc[0, 0] if not table_results[3].empty else 'empty'}")
+                        st.write(f"- **value_changes_count: {table_results[4].iloc[0, 0] if not table_results[4].empty else 'empty'}**")
+                        st.write(f"- value_changes_sample rows: {len(table_results[5])}")
+                        st.write(f"- prod_only_sample rows: {len(table_results[6])}")
+                        st.write(f"- test_only_sample rows: {len(table_results[7])}")
+                        # Debug: Show sample DataFrame details
+                        if not table_results[5].empty:
+                            st.write(f"- value_changes_sample columns: {list(table_results[5].columns)}")
+                            st.write(f"- value_changes_sample first row: {table_results[5].iloc[0].to_dict()}")
+
+                        comparison = self._process_sql_comparison_results(
+                            table_id,
+                            prod_count_df=table_results[0],
+                            test_count_df=table_results[1],
+                            prod_only_count_df=table_results[2],
+                            test_only_count_df=table_results[3],
+                            value_changes_count_df=table_results[4],
+                            value_changes_sample_df=table_results[5],
+                            prod_only_sample_df=table_results[6],
+                            test_only_sample_df=table_results[7],
+                            primary_keys=meta["primary_keys"]["production"],
+                            queries=queries,
+                        )
+                    else:
+                        # Fallback: execute individually
+                        st.write(f"🔍 Comparing `{table_id}` using SQL...")
+                        comparison = self._sql_based_comparison(
+                            table_id,
+                            prod_branch,
+                            test_branch,
+                            meta["primary_keys"]["production"],
+                            meta["columns"]["common"],
+                        )
+
+                    # Display status messages
+                    if comparison["status"] == ComparisonStatus.MATCH:
+                        st.success(f"✅ Table `{table_id}`: Perfect match ({comparison['production_row_count']:,} rows)")
+                    else:
+                        st.warning(f"⚠️ Table `{table_id}`: Found {comparison['differing_rows']:,} difference(s)")
+
+                    results[table_id] = comparison
+
+                else:
+                    # Pandas-based comparison (no workspace configured)
+                    comparison = self._pandas_based_comparison(
+                        table_id,
+                        prod_branch,
+                        test_branch,
+                        meta,
+                        row_limit,
+                        prod_table_id,
+                        test_table_id,
+                    )
+                    results[table_id] = comparison
 
             except Exception as e:
-                results[table_id] = {
-                    'status': 'error',
-                    'error': str(e),
-                    'message': 'Failed to compare row data'
-                }
+                if use_sql:
+                    # Log SQL comparison failure and try pandas fallback
+                    st.warning(f"⚠️ SQL comparison failed for `{table_id}`, using pandas fallback: {str(e)}")
+
+                    try:
+                        comparison = self._pandas_based_comparison(
+                            table_id,
+                            prod_branch,
+                            test_branch,
+                            meta,
+                            row_limit,
+                            prod_table_id,
+                            test_table_id,
+                        )
+                        results[table_id] = comparison
+
+                    except Exception as fallback_error:
+                        results[table_id] = {
+                            "status": ComparisonStatus.ERROR,
+                            "error": str(fallback_error),
+                            "message": "Failed to compare row data",
+                        }
+                else:
+                    results[table_id] = {
+                        "status": ComparisonStatus.ERROR,
+                        "error": str(e),
+                        "message": "Failed to compare row data",
+                    }
 
         return results
 
-    def _detailed_dataframe_comparison(
+    def _pandas_based_comparison(
         self,
-        df_prod: pd.DataFrame,
-        df_test: pd.DataFrame,
-        primary_keys: List[str]
+        table_id: str,
+        prod_branch: Optional[str],
+        test_branch: Optional[str],
+        meta: Dict[str, Any],
+        row_limit: int,
+        prod_table_id: Optional[str] = None,
+        test_table_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Compare row data using pandas DataFrame comparison.
+
+        Args:
+            table_id: Table identifier
+            prod_branch: Production branch ID
+            test_branch: Test branch ID
+            meta: Metadata comparison results for this table
+            row_limit: Maximum rows to compare
+            prod_table_id: Optional explicit production table ID
+            test_table_id: Optional explicit test table ID
+
+        Returns:
+            Comparison results dictionary
+        """
+        preview_limit = min(row_limit, self.PREVIEW_ROW_LIMIT)
+        prod_row_count = meta.get("row_count", {}).get("production", 0)
+        test_row_count = meta.get("row_count", {}).get("test", 0)
+        actual_count = max(prod_row_count, test_row_count)
+
+        if preview_limit < actual_count:
+            st.info(
+                f"ℹ️ Comparing first {preview_limit:,} rows for `{table_id}` "
+                f"(table has {actual_count:,} rows total)."
+            )
+
+        # Use explicit table IDs if provided, otherwise use table_id with branch
+        actual_prod_id = prod_table_id if prod_table_id else table_id
+        actual_test_id = test_table_id if test_table_id else table_id
+        actual_prod_branch = None if prod_table_id else prod_branch
+        actual_test_branch = None if test_table_id else test_branch
+
+        prod_data = self.client.get_table_data_preview(actual_prod_id, actual_prod_branch, limit=preview_limit)
+        test_data = self.client.get_table_data_preview(actual_test_id, actual_test_branch, limit=preview_limit)
+
+        comparison = self._detailed_dataframe_comparison(
+            prod_data, test_data, meta["primary_keys"]["production"]
+        )
+
+        if preview_limit < actual_count:
+            comparison["truncation_warning"] = f"Compared {preview_limit:,} of {actual_count:,} rows"
+
+        # Display status messages
+        if comparison["status"] == ComparisonStatus.MATCH:
+            st.success(f"✅ Table `{table_id}`: Perfect match ({comparison.get('production_row_count', len(prod_data)):,} rows)")
+        else:
+            st.warning(f"⚠️ Table `{table_id}`: Found {comparison.get('differing_rows', 'unknown')} difference(s)")
+
+        return comparison
+
+    def _build_sql_comparison_queries(
+        self,
+        table_id: str,
+        prod_branch: Optional[str],
+        test_branch: Optional[str],
+        columns: List[str],
+        primary_keys: List[str],
+        sample_limit: int = 100,
+        prod_table_id: Optional[str] = None,
+        test_table_id: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """
+        Build SQL queries for table comparison without executing them.
+
+        Uses PK-based comparison when primary keys are available:
+        - EXCEPT on PKs to find rows unique to each table
+        - JOIN + HASH to find rows with same PK but different values
+
+        Args:
+            table_id: Table ID to compare (used when prod/test_table_id not provided)
+            prod_branch: Production branch ID
+            test_branch: Test branch ID
+            columns: List of common columns to compare
+            primary_keys: List of primary key columns
+            sample_limit: Maximum rows to return for sample display (default 100)
+            prod_table_id: Optional explicit production table ID (for bucket pairs)
+            test_table_id: Optional explicit test table ID (for bucket pairs)
+
+        Returns:
+            Dictionary with query names as keys and SQL strings as values
+        """
+        # Get qualified table names - use explicit IDs if provided, otherwise build from table_id + branch
+        if prod_table_id:
+            prod_table = self.client.get_qualified_table_name(prod_table_id, None)
+        else:
+            prod_table = self.client.get_qualified_table_name(table_id, prod_branch)
+
+        if test_table_id:
+            test_table = self.client.get_qualified_table_name(test_table_id, None)
+        else:
+            test_table = self.client.get_qualified_table_name(table_id, test_branch)
+
+        # Build column lists with sanitization
+        all_columns_sorted = sorted(columns)
+        all_cols_list = ", ".join([_sanitize_sql_identifier(col) for col in all_columns_sorted])
+
+        # Sanitized PK columns
+        pk_cols_sanitized = [_sanitize_sql_identifier(pk) for pk in primary_keys]
+        pk_list = ", ".join(pk_cols_sanitized)
+
+        # Non-PK columns (for value comparison)
+        non_pk_columns = [col for col in all_columns_sorted if col not in primary_keys]
+        non_pk_cols_sanitized = [_sanitize_sql_identifier(col) for col in non_pk_columns]
+
+        # Build JOIN condition on PKs
+        join_conditions = " AND ".join([f"p.{pk} = t.{pk}" for pk in pk_cols_sanitized])
+
+        queries = {
+            "prod_count": f"SELECT COUNT(*) as count FROM {prod_table}",
+            "test_count": f"SELECT COUNT(*) as count FROM {test_table}",
+        }
+
+        if primary_keys and pk_list:
+            # PK-based comparison - more accurate
+
+            # Count PKs only in production (rows removed or not in test)
+            queries["prod_only_pks_count"] = f"""
+                SELECT COUNT(*) as count FROM (
+                    SELECT {pk_list} FROM {prod_table}
+                    EXCEPT
+                    SELECT {pk_list} FROM {test_table}
+                )
+            """
+
+            # Count PKs only in test (rows added or not in prod)
+            queries["test_only_pks_count"] = f"""
+                SELECT COUNT(*) as count FROM (
+                    SELECT {pk_list} FROM {test_table}
+                    EXCEPT
+                    SELECT {pk_list} FROM {prod_table}
+                )
+            """
+
+            # Count rows with same PK but different values (using HASH on non-PK columns)
+            if non_pk_cols_sanitized:
+                prod_hash_cols = ", ".join([f"p.{col}" for col in non_pk_cols_sanitized])
+                test_hash_cols = ", ".join([f"t.{col}" for col in non_pk_cols_sanitized])
+
+                queries["value_changes_count"] = f"""
+                    SELECT COUNT(*) as count FROM {prod_table} p
+                    INNER JOIN {test_table} t ON {join_conditions}
+                    WHERE HASH({prod_hash_cols}) != HASH({test_hash_cols})
+                """
+
+                # Sample of changed rows with both prod and test values for display
+                # Build select list with aliased columns: p.col as prod_col, t.col as test_col
+                pk_select = ", ".join([f"p.{pk} as {pk}" for pk in pk_cols_sanitized])
+                value_select_parts = []
+                for col in non_pk_cols_sanitized:
+                    value_select_parts.append(f"p.{col} as prod_{col.strip('\"')}")
+                    value_select_parts.append(f"t.{col} as test_{col.strip('\"')}")
+                value_select = ", ".join(value_select_parts)
+
+                queries["value_changes_sample"] = f"""
+                    SELECT {pk_select}, {value_select}
+                    FROM {prod_table} p
+                    INNER JOIN {test_table} t ON {join_conditions}
+                    WHERE HASH({prod_hash_cols}) != HASH({test_hash_cols})
+                    LIMIT {sample_limit}
+                """
+            else:
+                # All columns are PKs - no value changes possible, only unique rows
+                queries["value_changes_count"] = "SELECT 0 as count"
+                queries["value_changes_sample"] = f"SELECT {pk_list} FROM {prod_table} WHERE 1=0"
+
+            # Sample of rows only in production
+            queries["prod_only_sample"] = f"""
+                SELECT {all_cols_list} FROM {prod_table}
+                WHERE ({pk_list}) IN (
+                    SELECT {pk_list} FROM {prod_table}
+                    EXCEPT
+                    SELECT {pk_list} FROM {test_table}
+                )
+                LIMIT {sample_limit}
+            """
+
+            # Sample of rows only in test
+            queries["test_only_sample"] = f"""
+                SELECT {all_cols_list} FROM {test_table}
+                WHERE ({pk_list}) IN (
+                    SELECT {pk_list} FROM {test_table}
+                    EXCEPT
+                    SELECT {pk_list} FROM {prod_table}
+                )
+                LIMIT {sample_limit}
+            """
+
+        else:
+            # No PKs - fall back to full row EXCEPT (less accurate, can't distinguish value changes)
+            queries["prod_only_pks_count"] = f"""
+                SELECT COUNT(*) as count FROM (
+                    SELECT {all_cols_list} FROM {prod_table}
+                    EXCEPT
+                    SELECT {all_cols_list} FROM {test_table}
+                )
+            """
+            queries["test_only_pks_count"] = f"""
+                SELECT COUNT(*) as count FROM (
+                    SELECT {all_cols_list} FROM {test_table}
+                    EXCEPT
+                    SELECT {all_cols_list} FROM {prod_table}
+                )
+            """
+            queries["value_changes_count"] = "SELECT 0 as count"
+            queries["value_changes_sample"] = f"SELECT {all_cols_list} FROM {prod_table} WHERE 1=0"
+
+            queries["prod_only_sample"] = f"""
+                SELECT {all_cols_list} FROM {prod_table}
+                EXCEPT
+                SELECT {all_cols_list} FROM {test_table}
+                LIMIT {sample_limit}
+            """
+            queries["test_only_sample"] = f"""
+                SELECT {all_cols_list} FROM {test_table}
+                EXCEPT
+                SELECT {all_cols_list} FROM {prod_table}
+                LIMIT {sample_limit}
+            """
+
+        return queries
+
+    def _process_sql_comparison_results(
+        self,
+        table_id: str,
+        prod_count_df: pd.DataFrame,
+        test_count_df: pd.DataFrame,
+        prod_only_count_df: pd.DataFrame,
+        test_only_count_df: pd.DataFrame,
+        value_changes_count_df: pd.DataFrame,
+        value_changes_sample_df: pd.DataFrame,
+        prod_only_sample_df: pd.DataFrame,
+        test_only_sample_df: pd.DataFrame,
+        primary_keys: List[str],
+        queries: Dict[str, str],
+    ) -> Dict[str, Any]:
+        """
+        Process SQL query results into comparison result dictionary.
+
+        Uses new PK-based query structure:
+        - Separate counts for PKs only in prod/test (unique rows)
+        - Separate count for rows with same PK but different values
+        - Samples for display
+
+        Args:
+            table_id: Table ID being compared
+            prod_count_df: DataFrame with total production row count
+            test_count_df: DataFrame with total test row count
+            prod_only_count_df: DataFrame with count of PKs only in production
+            test_only_count_df: DataFrame with count of PKs only in test
+            value_changes_count_df: DataFrame with count of rows with same PK but different values
+            value_changes_sample_df: DataFrame with sample of changed rows (prod & test values)
+            prod_only_sample_df: DataFrame with sample of rows only in production
+            test_only_sample_df: DataFrame with sample of rows only in test
+            primary_keys: List of primary key columns
+            queries: Dictionary of SQL queries used
+
+        Returns:
+            Comparison results dictionary
+        """
+        # Extract counts using positional access to avoid column name case sensitivity issues
+        prod_count = int(prod_count_df.iloc[0, 0]) if not prod_count_df.empty else 0
+        test_count = int(test_count_df.iloc[0, 0]) if not test_count_df.empty else 0
+        prod_only_count = int(prod_only_count_df.iloc[0, 0]) if not prod_only_count_df.empty else 0
+        test_only_count = int(test_only_count_df.iloc[0, 0]) if not test_only_count_df.empty else 0
+        value_changes_count = int(value_changes_count_df.iloc[0, 0]) if not value_changes_count_df.empty else 0
+
+        # Total differences = unique rows + value changes
+        total_differences = prod_only_count + test_only_count + value_changes_count
+
+        # Calculate identical rows
+        if primary_keys:
+            # Rows that exist in both with same values
+            identical_rows = min(prod_count, test_count) - value_changes_count - max(prod_only_count, test_only_count)
+            identical_rows = max(0, identical_rows)  # Ensure non-negative
+        else:
+            identical_rows = None
+
+        # Build result
+        result = {
+            "table_id": table_id,
+            "total_rows_compared": max(prod_count, test_count),
+            "production_row_count": prod_count,
+            "test_row_count": test_count,
+            "differing_rows": total_differences,
+            "identical_rows": identical_rows,
+            "rows_with_value_changes": value_changes_count,
+            "rows_only_in_production": prod_only_count,
+            "rows_only_in_test": test_only_count,
+            "sample_differences": [],
+            "column_differences": {},
+            "comparison_method": "sql",
+            "sql_queries": queries,
+        }
+
+        # If tables match perfectly
+        if total_differences == 0 and prod_count == test_count:
+            result["status"] = ComparisonStatus.MATCH
+            return result
+
+        # Tables differ
+        result["status"] = ComparisonStatus.DIFFER
+
+        # Process value_changes_sample to extract column-level differences
+        # The sample has columns like: pk1, pk2, prod_col1, test_col1, prod_col2, test_col2, ...
+        column_diff_counts: Dict[str, int] = {}
+
+        if not value_changes_sample_df.empty and primary_keys:
+            sample_count = 0
+            for _, row in value_changes_sample_df.iterrows():
+                if sample_count >= self.SAMPLE_DISPLAY_LIMIT:
+                    break
+
+                # Build PK dict (case-insensitive column matching for Snowflake)
+                pk_dict = {}
+                for pk in primary_keys:
+                    # Find column case-insensitively
+                    pk_col = None
+                    for c in row.index:
+                        if c.lower() == pk.lower():
+                            pk_col = c
+                            break
+                    if pk_col:
+                        pk_dict[pk] = str(row[pk_col])
+
+                # Find changed columns by comparing prod_X vs test_X pairs
+                # Note: Snowflake may return uppercase column names
+                changed_columns = {}
+                for col in row.index:
+                    col_lower = col.lower()
+                    if col_lower.startswith("prod_"):
+                        base_col = col[5:]  # Remove 'prod_' or 'PROD_' prefix
+                        # Find matching test column (case-insensitive)
+                        test_col = None
+                        for c in row.index:
+                            if c.lower() == f"test_{base_col.lower()}":
+                                test_col = c
+                                break
+                        if test_col in row.index:
+                            prod_val = row[col]
+                            test_val = row[test_col]
+                            # Compare as strings to handle various types
+                            if str(prod_val) != str(test_val):
+                                changed_columns[base_col] = {
+                                    "production": str(prod_val),
+                                    "test": str(test_val),
+                                }
+                                column_diff_counts[base_col] = column_diff_counts.get(base_col, 0) + 1
+
+                if changed_columns:
+                    result["sample_differences"].append({
+                        "primary_key": pk_dict,
+                        "source": "value_changed",
+                        "changed_columns": changed_columns,
+                    })
+                    sample_count += 1
+
+        result["column_differences"] = column_diff_counts
+
+        # Add samples of rows only in production
+        remaining_slots = self.SAMPLE_DISPLAY_LIMIT - len(result["sample_differences"])
+        if not prod_only_sample_df.empty and remaining_slots > 0:
+            for _, row in prod_only_sample_df.head(remaining_slots).iterrows():
+                pk_dict = {}
+                if primary_keys:
+                    for pk in primary_keys:
+                        if pk in row.index:
+                            pk_dict[pk] = str(row[pk])
+
+                result["sample_differences"].append({
+                    "primary_key": pk_dict,
+                    "source": "production_only",
+                    "values": {str(col): str(row[col]) for col in row.index},
+                })
+
+        # Add samples of rows only in test
+        remaining_slots = self.SAMPLE_DISPLAY_LIMIT - len(result["sample_differences"])
+        if not test_only_sample_df.empty and remaining_slots > 0:
+            for _, row in test_only_sample_df.head(remaining_slots).iterrows():
+                pk_dict = {}
+                if primary_keys:
+                    for pk in primary_keys:
+                        if pk in row.index:
+                            pk_dict[pk] = str(row[pk])
+
+                result["sample_differences"].append({
+                    "primary_key": pk_dict,
+                    "source": "test_only",
+                    "values": {str(col): str(row[col]) for col in row.index},
+                })
+
+        return result
+
+    def _sql_based_comparison(
+        self,
+        table_id: str,
+        prod_branch: Optional[str],
+        test_branch: Optional[str],
+        primary_keys: List[str],
+        columns: List[str],
+    ) -> Dict[str, Any]:
+        """
+        Compare tables using PK-based SQL queries for maximum efficiency.
+
+        This method compares tables entirely in the database without loading data to memory.
+        Uses JOIN + HASH for value change detection when PKs are available.
+
+        Args:
+            table_id: Table ID to compare
+            prod_branch: Production branch ID
+            test_branch: Test branch ID
+            primary_keys: List of primary key columns
+            columns: List of common columns to compare
+
+        Returns:
+            Comparison results dictionary
+        """
+        # Validate table ID format
+        if not _validate_table_id(table_id):
+            raise ValueError(f"Invalid table ID format: {table_id}")
+
+        # Build queries with new PK-based structure
+        queries = self._build_sql_comparison_queries(
+            table_id, prod_branch, test_branch,
+            columns=columns,
+            primary_keys=primary_keys,
+            sample_limit=self.SAMPLE_DISPLAY_LIMIT * 20,
+        )
+
+        # Execute queries in batch (8 queries)
+        query_list = [
+            queries["prod_count"],           # 0
+            queries["test_count"],           # 1
+            queries["prod_only_pks_count"],  # 2
+            queries["test_only_pks_count"],  # 3
+            queries["value_changes_count"],  # 4
+            queries["value_changes_sample"], # 5
+            queries["prod_only_sample"],     # 6
+            queries["test_only_sample"],     # 7
+        ]
+        # Query Service API always uses production/default branch ID
+        results_list = self.client.execute_queries_batch(query_list)
+
+        # Process results using shared method
+        result = self._process_sql_comparison_results(
+            table_id,
+            prod_count_df=results_list[0],
+            test_count_df=results_list[1],
+            prod_only_count_df=results_list[2],
+            test_only_count_df=results_list[3],
+            value_changes_count_df=results_list[4],
+            value_changes_sample_df=results_list[5],
+            prod_only_sample_df=results_list[6],
+            test_only_sample_df=results_list[7],
+            primary_keys=primary_keys,
+            queries=queries,
+        )
+
+        # Display status messages
+        if result["status"] == ComparisonStatus.MATCH:
+            st.success(f"✅ Table `{table_id}`: Perfect match ({result['production_row_count']:,} rows)")
+        else:
+            st.warning(f"⚠️ Table `{table_id}`: Found {result['differing_rows']:,} difference(s)")
+
+        return result
+
+    def _detailed_dataframe_comparison(
+        self, df_prod: pd.DataFrame, df_test: pd.DataFrame, primary_keys: List[str]
     ) -> Dict[str, Any]:
         """
         Detailed DataFrame comparison using pandas.
@@ -444,69 +1342,262 @@ class ComparisonEngine:
             Detailed comparison results
         """
         try:
+            # Debugging info
+            logger.debug("DEBUG DATA COMPARISON")
+            logger.debug("Primary Keys: %s (type: %s)", primary_keys, [type(k) for k in primary_keys])
+            logger.debug("Prod Columns: %s", df_prod.columns.tolist())
+            logger.debug("Prod Data Sample: %s", df_prod.head(2).to_dict(orient="records"))
+
+            # SAFETY: Ensure all columns are strings to prevent sorting errors
+            df_prod.columns = df_prod.columns.astype(str)
+            df_test.columns = df_test.columns.astype(str)
+
             # Sort columns alphabetically for consistent comparison
-            df_prod = df_prod.reindex(sorted(df_prod.columns), axis=1)
-            df_test = df_test.reindex(sorted(df_test.columns), axis=1)
+            try:
+                sorted_prod_cols = sorted(df_prod.columns)
+                sorted_test_cols = sorted(df_test.columns)
+            except TypeError as e:
+                logger.error("ERROR SORTING COLUMNS: %s", e)
+                logger.error("Prod Cols Type: %s", [type(c) for c in df_prod.columns])
+                raise e
+
+            df_prod = df_prod.reindex(sorted_prod_cols, axis=1)
+            df_test = df_test.reindex(sorted_test_cols, axis=1)
 
             # Set index if primary keys exist
             if primary_keys and len(primary_keys) > 0:
                 # Check if all PKs exist in both DataFrames
-                if all(pk in df_prod.columns for pk in primary_keys) and \
-                   all(pk in df_test.columns for pk in primary_keys):
+                if all(pk in df_prod.columns for pk in primary_keys) and all(
+                    pk in df_test.columns for pk in primary_keys
+                ):
                     df_prod = df_prod.set_index(primary_keys).sort_index()
                     df_test = df_test.set_index(primary_keys).sort_index()
 
-            # Use pandas compare method
-            differences_df = df_prod.compare(df_test, keep_equal=False, result_names=('production', 'test'))
+            # Align indices safely
+            # We need to find common indices and unique indices
+            common_idx = df_prod.index.intersection(df_test.index)
+            prod_only_idx = df_prod.index.difference(df_test.index)
+            test_only_idx = df_test.index.difference(df_prod.index)
+
+            # DataFrames for common rows
+            df_prod_common = df_prod.loc[common_idx]
+            df_test_common = df_test.loc[common_idx]
+
+            # Use pandas compare method ONLY on common rows
+            if not df_prod_common.empty:
+                differences_df = df_prod_common.compare(
+                    df_test_common, keep_equal=False, result_names=("production", "test")
+                )
+            else:
+                differences_df = pd.DataFrame()
 
             # Analyze differences
+            # Base stats
+            n_common = len(common_idx)
+            n_prod_only = len(prod_only_idx)
+            n_test_only = len(test_only_idx)
+            n_diff_common = len(differences_df)
+
+            total_differences = n_prod_only + n_test_only + n_diff_common
+
             diff_summary = {
-                'total_rows_compared': len(df_prod),
-                'differing_rows': len(differences_df) if not differences_df.empty else 0,
-                'identical_rows': len(df_prod) - (len(differences_df) if not differences_df.empty else 0),
-                'column_differences': {},
-                'sample_differences': []
+                "total_rows_compared": max(len(df_prod), len(df_test)),
+                "differing_rows": total_differences,
+                "identical_rows": n_common - n_diff_common,
+                "rows_with_value_changes": n_diff_common,
+                "rows_only_in_production": n_prod_only,
+                "rows_only_in_test": n_test_only,
+                "column_differences": {},
+                "sample_differences": [],
             }
+
+            # Add unique rows to sample differences
+            if n_prod_only > 0:
+                sample_prod = df_prod.loc[prod_only_idx].head(self.SAMPLE_DISPLAY_LIMIT)
+                for idx, row in sample_prod.iterrows():
+                    # Build PK dict
+                    if isinstance(idx, tuple):
+                        pk_dict = {pk: idx[i] for i, pk in enumerate(primary_keys)}
+                    elif primary_keys:
+                        pk_dict = {primary_keys[0]: idx}
+                    else:
+                        pk_dict = {"row": idx}
+
+                    diff_summary["sample_differences"].append(
+                        {
+                            "primary_key": pk_dict,
+                            "source": "production_only",
+                            "values": {str(k): str(v) for k, v in row.items()},
+                        }
+                    )
+
+            if n_test_only > 0:
+                sample_test = df_test.loc[test_only_idx].head(self.SAMPLE_DISPLAY_LIMIT)
+                for idx, row in sample_test.iterrows():
+                    # Build PK dict
+                    if isinstance(idx, tuple):
+                        pk_dict = {pk: idx[i] for i, pk in enumerate(primary_keys)}
+                    elif primary_keys:
+                        pk_dict = {primary_keys[0]: idx}
+                    else:
+                        pk_dict = {"row": idx}
+
+                    diff_summary["sample_differences"].append(
+                        {
+                            "primary_key": pk_dict,
+                            "source": "test_only",
+                            "values": {str(k): str(v) for k, v in row.items()},
+                        }
+                    )
 
             if not differences_df.empty:
                 # Count differences per column
                 for col in differences_df.columns.get_level_values(0).unique():
                     count = differences_df[col].notna().any(axis=1).sum()
-                    diff_summary['column_differences'][col] = count
+                    diff_summary["column_differences"][col] = count
 
                 # Get sample differences (first 10)
-                sample_rows = differences_df.head(10)
+                sample_rows = differences_df.head(self.SAMPLE_DIFF_LIMIT)
                 for idx in sample_rows.index:
                     for col in differences_df.columns.get_level_values(0).unique():
                         try:
-                            prod_val = sample_rows.loc[idx, (col, 'production')]
-                            test_val = sample_rows.loc[idx, (col, 'test')]
+                            prod_val = sample_rows.loc[idx, (col, "production")]
+                            test_val = sample_rows.loc[idx, (col, "test")]
 
                             if pd.notna(prod_val) or pd.notna(test_val):
                                 # Build primary key dict
                                 if isinstance(idx, tuple):
                                     pk_dict = {pk: idx[i] for i, pk in enumerate(primary_keys)}
                                 else:
-                                    pk_dict = {primary_keys[0]: idx} if primary_keys else {'row': idx}
+                                    pk_dict = {primary_keys[0]: idx} if primary_keys else {"row": idx}
 
-                                diff_summary['sample_differences'].append({
-                                    'primary_key': pk_dict,
-                                    'column': col,
-                                    'production_value': str(prod_val) if pd.notna(prod_val) else None,
-                                    'test_value': str(test_val) if pd.notna(test_val) else None
-                                })
-                        except:
+                                diff_summary["sample_differences"].append(
+                                    {
+                                        "primary_key": pk_dict,
+                                        "column": col,
+                                        "production_value": str(prod_val) if pd.notna(prod_val) else None,
+                                        "test_value": str(test_val) if pd.notna(test_val) else None,
+                                    }
+                                )
+                        except (KeyError, IndexError, TypeError):
                             continue
 
-            diff_summary['status'] = 'match' if len(differences_df) == 0 else 'differ'
+            diff_summary["status"] = ComparisonStatus.MATCH if total_differences == 0 else ComparisonStatus.DIFFER
             return diff_summary
 
         except Exception as e:
-            return {
-                'status': 'error',
-                'error': str(e),
-                'message': 'Failed to compare DataFrames'
+            logger.exception("PANDAS FALLBACK ERROR: %s", e)
+            return {"status": ComparisonStatus.ERROR, "error": str(e), "message": "Failed to compare DataFrames"}
+
+    def _compare_job_logs(self) -> Optional[Dict[str, Any]]:
+        """
+        Compare job logs/events between production and test runs.
+
+        Returns:
+            Log comparison results dictionary or None if not applicable
+        """
+        st.markdown("### 📝 Job Logs Comparison")
+
+        # Get job IDs from session state
+        prod_job_id = st.session_state.get("production_job_id")
+        test_job_id = st.session_state.get("test_job_id")
+
+        if not prod_job_id or not test_job_id:
+            st.info("ℹ️ Job IDs not available - skipping log comparison")
+            return None
+
+        try:
+            # Fetch job events/logs
+            st.info(f"Fetching logs for production job: {prod_job_id}")
+            prod_events = self.client.get_job_events(prod_job_id)
+
+            st.info(f"Fetching logs for test job: {test_job_id}")
+            test_events = self.client.get_job_events(test_job_id)
+
+            # Show debug info about event types
+            prod_event_types = {}
+            for event in prod_events:
+                event_type = event.get("event", "unknown")
+                prod_event_types[event_type] = prod_event_types.get(event_type, 0) + 1
+
+            st.info(f"Production event types: {prod_event_types}")
+
+            test_event_types = {}
+            for event in test_events:
+                event_type = event.get("event", "unknown")
+                test_event_types[event_type] = test_event_types.get(event_type, 0) + 1
+
+            st.info(f"Test event types: {test_event_types}")
+
+            # Show sample events in advanced mode
+            if st.session_state.get("show_advanced", False):
+                with st.expander("🔧 Sample Production Event (first non-storage event)"):
+                    for event in prod_events[:20]:  # Check first 20
+                        if not event.get("event", "").startswith("storage."):
+                            st.json(event)
+                            break
+
+                with st.expander("🔧 Sample Test Event (first non-storage event)"):
+                    for event in test_events[:20]:
+                        if not event.get("event", "").startswith("storage."):
+                            st.json(event)
+                            break
+
+            # Filter to only component output logs (typically "info" events with component output)
+            # Skip system events like "storage.*", "job.*", etc.
+            def is_component_log(event):
+                event_type = event.get("event", "")
+                # Include only standard log events, exclude storage/system events
+                return not event_type.startswith(("storage.", "job."))
+
+            prod_log_events = [e for e in prod_events if is_component_log(e)]
+            test_log_events = [e for e in test_events if is_component_log(e)]
+
+            # Extract log messages from filtered events
+            prod_messages = [event.get("message", "") for event in prod_log_events if event.get("message")]
+            test_messages = [event.get("message", "") for event in test_log_events if event.get("message")]
+
+            st.success(
+                f"✅ Fetched {len(prod_messages)} production log messages and {len(test_messages)} test log messages (filtered from {len(prod_events)} and {len(test_events)} total events)"
+            )
+
+            # Compare log messages
+            prod_set = set(prod_messages)
+            test_set = set(test_messages)
+
+            common_messages = sorted(prod_set & test_set)
+            prod_only_messages = sorted(prod_set - test_set)
+            test_only_messages = sorted(test_set - prod_set)
+
+            # Build detailed comparison
+            result = {
+                "production_job_id": prod_job_id,
+                "test_job_id": test_job_id,
+                "production_message_count": len(prod_messages),
+                "test_message_count": len(test_messages),
+                "production_unique_message_count": len(prod_set),
+                "test_unique_message_count": len(test_set),
+                "common_messages": common_messages,
+                "production_only_messages": prod_only_messages,
+                "test_only_messages": test_only_messages,
+                "production_events": prod_events,  # Full event data
+                "test_events": test_events,  # Full event data
+                "status": ComparisonStatus.MATCH if prod_set == test_set else ComparisonStatus.DIFFER,
             }
+
+            if result["status"] == ComparisonStatus.MATCH:
+                st.success("✅ Job logs match perfectly")
+            else:
+                st.warning(
+                    f"⚠️ Job logs differ: {len(prod_only_messages)} production-only, {len(test_only_messages)} test-only"
+                )
+
+            return result
+
+        except Exception as e:
+            st.error(f"❌ Failed to compare job logs: {str(e)}")
+            st.exception(e)
+            return {"status": ComparisonStatus.ERROR, "error": str(e)}
 
     def _generate_summary(self, comparison_results: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -518,47 +1609,35 @@ class ComparisonEngine:
         Returns:
             Summary dictionary
         """
-        bucket_comp = comparison_results['bucket_comparison']
-        table_comp = comparison_results['table_comparison']
-        meta_comp = comparison_results['metadata_comparison']
-        row_comp = comparison_results['row_differences']
+        bucket_comp = comparison_results["bucket_comparison"]
+        table_comp = comparison_results["table_comparison"]
+        meta_comp = comparison_results["metadata_comparison"]
+        row_comp = comparison_results["row_differences"]
 
         # Count totals
-        total_buckets = len(bucket_comp['common']) + \
-                       len(bucket_comp['production_only']) + \
-                       len(bucket_comp['test_only'])
-        matching_buckets = len(bucket_comp['common']) if bucket_comp['status'] == 'match' else 0
+        total_buckets = len(bucket_comp["common"]) + len(bucket_comp["production_only"]) + len(bucket_comp["test_only"])
+        matching_buckets = len(bucket_comp["common"]) if bucket_comp["status"] == ComparisonStatus.MATCH else 0
 
         # Count tables
         total_tables = sum(
-            len(comp['common']) + len(comp['production_only']) + len(comp['test_only'])
-            for comp in table_comp.values()
+            len(comp["common"]) + len(comp["production_only"]) + len(comp["test_only"]) for comp in table_comp.values()
         )
-        matching_tables = sum(
-            len(comp['common']) if comp['status'] == 'match' else 0
-            for comp in table_comp.values()
-        )
+        matching_tables = sum(len(comp["common"]) if comp["status"] == ComparisonStatus.MATCH else 0 for comp in table_comp.values())
 
         # Count differences
-        tables_with_metadata_diffs = sum(
-            1 for meta in meta_comp.values()
-            if meta.get('status') == 'differ'
-        )
+        tables_with_metadata_diffs = sum(1 for meta in meta_comp.values() if meta.get("status") == ComparisonStatus.DIFFER)
 
-        tables_with_row_diffs = sum(
-            1 for row in row_comp.values()
-            if row.get('status') == 'differ'
-        )
+        tables_with_row_diffs = sum(1 for row in row_comp.values() if row.get("status") == ComparisonStatus.DIFFER)
 
         # Generate key findings
         key_findings = []
 
-        if bucket_comp['production_only']:
+        if bucket_comp["production_only"]:
             key_findings.append(
                 f"{len(bucket_comp['production_only'])} bucket(s) only in production: {', '.join(bucket_comp['production_only'][:3])}"
             )
 
-        if bucket_comp['test_only']:
+        if bucket_comp["test_only"]:
             key_findings.append(
                 f"{len(bucket_comp['test_only'])} bucket(s) only in test: {', '.join(bucket_comp['test_only'][:3])}"
             )
@@ -570,20 +1649,719 @@ class ComparisonEngine:
             key_findings.append(f"{tables_with_row_diffs} table(s) have row-level differences")
 
         # Determine overall status
-        overall_status = 'match' if (
-            bucket_comp['status'] == 'match' and
-            all(t['status'] == 'match' for t in table_comp.values()) and
-            tables_with_metadata_diffs == 0 and
-            tables_with_row_diffs == 0
-        ) else 'differ'
+        overall_status = (
+            ComparisonStatus.MATCH
+            # Buckets: Match OR Skipped (don't fail if skipped)
+            if (
+                (bucket_comp["status"] == ComparisonStatus.MATCH or bucket_comp["status"] == ComparisonStatus.SKIPPED)
+                and all(t["status"] == ComparisonStatus.MATCH for t in table_comp.values())
+                and tables_with_metadata_diffs == 0
+                and tables_with_row_diffs == 0
+            )
+            else ComparisonStatus.DIFFER
+        )
 
         return {
-            'overall_status': overall_status,
-            'total_buckets': total_buckets,
-            'matching_buckets': matching_buckets,
-            'total_tables': total_tables,
-            'matching_tables': matching_tables,
-            'tables_with_metadata_differences': tables_with_metadata_diffs,
-            'tables_with_row_differences': tables_with_row_diffs,
-            'key_findings': key_findings if key_findings else ['All outputs match perfectly!']
+            "overall_status": overall_status,
+            "total_buckets": total_buckets,
+            "matching_buckets": matching_buckets,
+            "total_tables": total_tables,
+            "matching_tables": matching_tables,
+            "tables_with_metadata_differences": tables_with_metadata_diffs,
+            "tables_with_row_differences": tables_with_row_diffs,
+            "key_findings": key_findings if key_findings else ["All outputs match perfectly!"],
         }
+
+    def compare_specific_tables(
+        self, production_branch: Optional[str], test_branch_id: Optional[str], table_ids: List[str]
+    ) -> Dict[str, Any]:
+        """
+        Compare specific tables between two branches.
+
+        Args:
+            production_branch: Production branch ID (None for default branch)
+            test_branch_id: Test branch ID
+            table_ids: List of table IDs to compare
+
+        Returns:
+            Comparison results dictionary
+        """
+        st.markdown("## 🔍 Starting Table-Specific Comparison")
+        st.info(f"""
+        **Comparing:**
+        - 🔵 Production Branch ID: `{production_branch}`
+        - 🟢 Test Branch ID: `{test_branch_id}`
+        - 📊 Tables: {len(table_ids)}
+        """)
+
+        results = {}
+
+        # Create mock bucket comparison (tables mode doesn't compare buckets)
+        results["bucket_comparison"] = {
+            "production_only": [],
+            "test_only": [],
+            "common": [],
+            "status": ComparisonStatus.SKIPPED,
+            "_mode": "tables",
+        }
+
+        # Create mock table comparison structure using provided table IDs
+        results["table_comparison"] = {}
+        for table_id in table_ids:
+            # Extract bucket from table ID (format: bucket.table)
+            parts = table_id.rsplit(".", 1)
+            if len(parts) == 2:
+                bucket_id = parts[0]
+                if bucket_id not in results["table_comparison"]:
+                    results["table_comparison"][bucket_id] = {
+                        "production_only": [],
+                        "test_only": [],
+                        "common": [],
+                        "status": ComparisonStatus.MATCH,
+                    }
+                results["table_comparison"][bucket_id]["common"].append(parts[1])
+
+        # Level 3: Metadata comparison for specified tables
+        st.markdown("---")
+        st.markdown("## Step 1: Metadata Comparison")
+        results["metadata_comparison"] = {}
+        for table_id in table_ids:
+            try:
+                prod_meta = self.client.get_table_detail(table_id, production_branch)
+                test_meta = self.client.get_table_detail(table_id, test_branch_id)
+
+                pk_comparison = self._compare_primary_keys(prod_meta, test_meta)
+                col_comparison = self._compare_columns(prod_meta, test_meta)
+                type_comparison = self._compare_data_types(prod_meta, test_meta)
+                count_comparison = self._compare_row_counts(prod_meta, test_meta)
+
+                all_match = (
+                    pk_comparison["match"]
+                    and col_comparison["match"]
+                    and type_comparison["match"]
+                    and count_comparison["match"]
+                )
+
+                results["metadata_comparison"][table_id] = {
+                    "primary_keys": pk_comparison,
+                    "columns": col_comparison,
+                    "data_types": type_comparison,
+                    "row_count": count_comparison,
+                    "status": ComparisonStatus.MATCH if all_match else ComparisonStatus.DIFFER,
+                }
+
+                if all_match:
+                    st.success(f"✅ Table `{table_id}`: All metadata matches")
+                else:
+                    st.warning(f"⚠️ Table `{table_id}`: Metadata differences found")
+
+            except Exception as e:
+                st.error(f"❌ Error comparing metadata for table `{table_id}`: {str(e)}")
+                results["metadata_comparison"][table_id] = {"status": ComparisonStatus.ERROR, "error": str(e)}
+
+        # Level 4: Row-level comparison
+        st.markdown("---")
+        st.markdown("## Step 2: Row-Level Data Comparison")
+        results["row_differences"] = self._compare_row_data(
+            production_branch, test_branch_id, results["metadata_comparison"]
+        )
+
+        # Generate summary
+        st.markdown("---")
+        st.markdown("## 📊 Generating Summary")
+        results["summary"] = self._generate_summary(results)
+
+        st.markdown("---")
+        st.success("✅ Comparison complete!")
+
+        return results
+
+    def compare_specific_buckets(
+        self, production_branch: Optional[str], test_branch_id: Optional[str], bucket_ids: List[str]
+    ) -> Dict[str, Any]:
+        """
+        Compare all tables in specific buckets between two branches.
+
+        Args:
+            production_branch: Production branch ID (None for default branch)
+            test_branch_id: Test branch ID
+            bucket_ids: List of bucket IDs to compare (may contain embedded branch IDs)
+
+        Returns:
+            Comparison results dictionary
+        """
+        # Normalize bucket IDs to strip any embedded branch IDs
+        # Users may enter bucket IDs copied from Keboola UI which include branch IDs
+        # e.g., "in.c-27406-mybucket" -> "in.c-mybucket"
+        normalized_bucket_ids = [_normalize_bucket_id(bid) for bid in bucket_ids]
+
+        st.markdown("## 🔍 Starting Bucket-Specific Comparison")
+        st.info(f"""
+        **Comparing:**
+        - 🔵 Production Branch ID: `{production_branch}`
+        - 🟢 Test Branch ID: `{test_branch_id}`
+        - 🗂️ Buckets: {len(normalized_bucket_ids)}
+        """)
+
+        # Show normalization info if any bucket IDs were modified
+        if normalized_bucket_ids != bucket_ids:
+            with st.expander("ℹ️ Bucket ID Normalization", expanded=False):
+                st.write("Bucket IDs were normalized to remove embedded branch IDs:")
+                for orig, norm in zip(bucket_ids, normalized_bucket_ids):
+                    if orig != norm:
+                        st.text(f"  {orig} → {norm}")
+
+        results = {}
+
+        # Level 1: Mock bucket comparison (we already know which buckets to compare)
+        st.markdown("---")
+        st.markdown("## Step 1: Bucket Validation")
+        results["bucket_comparison"] = {
+            "production_only": [],
+            "test_only": [],
+            "common": normalized_bucket_ids,  # We're explicitly comparing these buckets
+            "status": ComparisonStatus.MATCH,
+            "_mode": "buckets",
+        }
+        st.success(f"✅ Comparing {len(normalized_bucket_ids)} specified bucket(s)")
+
+        # Level 2: Table comparison within specified buckets
+        st.markdown("---")
+        st.markdown("## Step 2: Table Comparison")
+        results["table_comparison"] = {}
+        for bucket_id in normalized_bucket_ids:
+            st.markdown(f"#### Bucket: `{bucket_id}`")
+
+            try:
+                prod_tables = set(self.client.list_tables_in_bucket(bucket_id, production_branch))
+                test_tables = set(self.client.list_tables_in_bucket(bucket_id, test_branch_id))
+
+                common = sorted(prod_tables & test_tables)
+                prod_only = sorted(prod_tables - test_tables)
+                test_only = sorted(test_tables - prod_tables)
+
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Common Tables", len(common))
+                with col2:
+                    st.metric("Production Only", len(prod_only))
+                with col3:
+                    st.metric("Test Only", len(test_only))
+
+                results["table_comparison"][bucket_id] = {
+                    "production_only": prod_only,
+                    "test_only": test_only,
+                    "common": common,
+                    "status": ComparisonStatus.MATCH if prod_tables == test_tables else ComparisonStatus.DIFFER,
+                }
+            except Exception as e:
+                st.error(f"❌ Error comparing tables in bucket `{bucket_id}`: {str(e)}")
+                results["table_comparison"][bucket_id] = {
+                    "production_only": [],
+                    "test_only": [],
+                    "common": [],
+                    "status": ComparisonStatus.ERROR,
+                    "error": str(e),
+                }
+
+        # Level 3: Metadata comparison
+        st.markdown("---")
+        st.markdown("## Step 3: Metadata Comparison")
+        results["metadata_comparison"] = self._compare_metadata(
+            production_branch, test_branch_id, results["table_comparison"]
+        )
+
+        # Level 4: Row-level comparison
+        st.markdown("---")
+        st.markdown("## Step 4: Row-Level Data Comparison")
+        results["row_differences"] = self._compare_row_data(
+            production_branch, test_branch_id, results["metadata_comparison"]
+        )
+
+        # Generate summary
+        st.markdown("---")
+        st.markdown("## 📊 Generating Summary")
+        results["summary"] = self._generate_summary(results)
+
+        st.markdown("---")
+        st.success("✅ Comparison complete!")
+
+        return results
+
+    def compare_bucket_pairs(self, bucket_pairs: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Compare buckets using pre-parsed URL information.
+
+        Each bucket pair contains bucket_a and bucket_b with:
+        - branch_id: Branch ID (None for production)
+        - bucket_id: Full bucket ID as it appears in the API
+        - canonical_bucket_id: Display name without branch prefix
+
+        Args:
+            bucket_pairs: List of bucket pair dictionaries from parse_bucket_url
+
+        Returns:
+            Comparison results dictionary
+        """
+        st.markdown("## 🔍 Starting Bucket Comparison")
+
+        # Display what we're comparing
+        for idx, pair in enumerate(bucket_pairs):
+            bucket_a = pair["bucket_a"]
+            bucket_b = pair["bucket_b"]
+            branch_a = f"Branch {bucket_a['branch_id']}" if bucket_a["branch_id"] else "Production"
+            branch_b = f"Branch {bucket_b['branch_id']}" if bucket_b["branch_id"] else "Production"
+
+            st.info(f"""
+            **Pair {idx + 1}:**
+            - 🔵 {branch_a}: `{bucket_a['canonical_bucket_id']}`
+            - 🟢 {branch_b}: `{bucket_b['canonical_bucket_id']}`
+            """)
+
+        results = {
+            "bucket_comparison": {
+                "production_only": [],
+                "test_only": [],
+                "common": [p["bucket_a"]["canonical_bucket_id"] for p in bucket_pairs],
+                "status": ComparisonStatus.MATCH,
+                "_mode": "bucket_pairs",
+            },
+            "table_comparison": {},
+            "metadata_comparison": {},
+            "row_differences": {},
+        }
+
+        # Process each bucket pair
+        st.markdown("---")
+        st.markdown("## Step 1: Table Comparison")
+
+        all_table_pairs = []  # Collect table pairs for metadata/row comparison
+
+        for pair_idx, pair in enumerate(bucket_pairs):
+            bucket_a = pair["bucket_a"]
+            bucket_b = pair["bucket_b"]
+
+            pair_key = bucket_a["canonical_bucket_id"]
+            st.markdown(f"### Pair {pair_idx + 1}: `{pair_key}`")
+
+            try:
+                # List tables using the full bucket IDs directly (no transformation needed)
+                # The bucket_id from URL is exactly what the API expects
+                tables_a = set(self._list_tables_direct(bucket_a["bucket_id"]))
+                tables_b = set(self._list_tables_direct(bucket_b["bucket_id"]))
+
+                common = sorted(tables_a & tables_b)
+                a_only = sorted(tables_a - tables_b)
+                b_only = sorted(tables_b - tables_a)
+
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Common Tables", len(common))
+                with col2:
+                    st.metric("Bucket A Only", len(a_only))
+                with col3:
+                    st.metric("Bucket B Only", len(b_only))
+
+                results["table_comparison"][pair_key] = {
+                    "production_only": a_only,
+                    "test_only": b_only,
+                    "common": common,
+                    "status": ComparisonStatus.MATCH if tables_a == tables_b else ComparisonStatus.DIFFER,
+                }
+
+                # Collect table pairs for subsequent comparison
+                for table_name in common:
+                    all_table_pairs.append({
+                        "table_name": table_name,
+                        "table_a_id": f"{bucket_a['bucket_id']}.{table_name}",
+                        "table_b_id": f"{bucket_b['bucket_id']}.{table_name}",
+                        "branch_a": bucket_a["branch_id"],
+                        "branch_b": bucket_b["branch_id"],
+                        "display_key": f"{pair_key}.{table_name}",
+                    })
+
+            except Exception as e:
+                st.error(f"❌ Error comparing tables in pair {pair_idx + 1}: {str(e)}")
+                results["table_comparison"][pair_key] = {
+                    "production_only": [],
+                    "test_only": [],
+                    "common": [],
+                    "status": ComparisonStatus.ERROR,
+                    "error": str(e),
+                }
+
+        # Step 2: Metadata comparison for all table pairs
+        st.markdown("---")
+        st.markdown("## Step 2: Metadata Comparison")
+
+        if not all_table_pairs:
+            st.warning("⚠️ No common tables to compare metadata")
+        else:
+            st.info(f"Comparing metadata for {len(all_table_pairs)} common table(s)...")
+            results["metadata_comparison"] = self._compare_table_pairs_metadata(all_table_pairs)
+
+        # Step 3: Row-level comparison - reuse the existing method
+        st.markdown("---")
+        st.markdown("## Step 3: Row-Level Data Comparison")
+
+        if not results["metadata_comparison"]:
+            st.warning("⚠️ No tables to compare at row level")
+        else:
+            # Reuse _compare_row_data - it will use _table_pair info from metadata for explicit table IDs
+            results["row_differences"] = self._compare_row_data(
+                None, None, results["metadata_comparison"]
+            )
+
+        # Generate summary
+        st.markdown("---")
+        st.markdown("## 📊 Generating Summary")
+        results["summary"] = self._generate_summary(results)
+
+        st.markdown("---")
+        st.success("✅ Comparison complete!")
+
+        return results
+
+    def _list_tables_direct(self, full_bucket_id: str) -> List[str]:
+        """
+        List tables in a bucket using the full bucket ID directly.
+
+        Args:
+            full_bucket_id: Full bucket ID as it appears in the API (e.g., in.c-27405-mybucket)
+
+        Returns:
+            List of table names
+        """
+        url = f"{self.client.storage_url}/v2/storage/buckets/{full_bucket_id}"
+        response = requests.get(url, headers=self.client.headers)
+        response.raise_for_status()
+        bucket = response.json()
+        return [table["name"] for table in bucket.get("tables", [])]
+
+    def _compare_table_pairs_metadata(self, table_pairs: List[Dict]) -> Dict[str, Any]:
+        """
+        Compare metadata for table pairs using parallel fetching.
+
+        Args:
+            table_pairs: List of table pair info dicts
+
+        Returns:
+            Metadata comparison results keyed by display_key
+        """
+        results = {}
+
+        if not table_pairs:
+            return results
+
+        st.info(f"Fetching metadata for {len(table_pairs)} table pair(s) in parallel...")
+
+        # Phase 1: Fetch all metadata in parallel using ThreadPoolExecutor
+        metadata_cache: Dict[str, Dict[str, Any]] = {}  # display_key -> {"a": meta, "b": meta}
+        fetch_errors: Dict[str, str] = {}
+
+        def fetch_metadata(table_id: str, key: str, side: str):
+            """Thread-safe metadata fetch."""
+            try:
+                url = f"{self.client.storage_url}/v2/storage/tables/{table_id}"
+                response = requests.get(url, headers=self.client.headers)
+                response.raise_for_status()
+                return (key, side, response.json(), None)
+            except Exception as e:
+                return (key, side, None, str(e))
+
+        max_workers = min(20, len(table_pairs) * 2)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = []
+
+            for pair in table_pairs:
+                display_key = pair["display_key"]
+                # Fetch both sides in parallel
+                futures.append(executor.submit(fetch_metadata, pair["table_a_id"], display_key, "a"))
+                futures.append(executor.submit(fetch_metadata, pair["table_b_id"], display_key, "b"))
+
+            # Collect results
+            for future in as_completed(futures):
+                key, side, meta, error = future.result()
+                if key not in metadata_cache:
+                    metadata_cache[key] = {}
+                if error:
+                    fetch_errors[f"{key}_{side}"] = error
+                else:
+                    metadata_cache[key][side] = meta
+
+        # Phase 2: Process results
+        for pair in table_pairs:
+            display_key = pair["display_key"]
+            cache_entry = metadata_cache.get(display_key, {})
+            meta_a = cache_entry.get("a")
+            meta_b = cache_entry.get("b")
+
+            # Check for fetch errors
+            error_a = fetch_errors.get(f"{display_key}_a")
+            error_b = fetch_errors.get(f"{display_key}_b")
+
+            if error_a or error_b:
+                error_msg = f"Fetch errors - a: {error_a}, b: {error_b}"
+                st.error(f"❌ Error fetching metadata for `{display_key}`: {error_msg}")
+                results[display_key] = {
+                    "status": ComparisonStatus.ERROR,
+                    "error": error_msg,
+                    "_table_pair": pair,
+                }
+                continue
+
+            if not meta_a or not meta_b:
+                st.error(f"❌ Missing metadata for `{display_key}`")
+                results[display_key] = {
+                    "status": ComparisonStatus.ERROR,
+                    "error": "Missing metadata",
+                    "_table_pair": pair,
+                }
+                continue
+
+            try:
+                pk_comparison = self._compare_primary_keys(meta_a, meta_b)
+                col_comparison = self._compare_columns(meta_a, meta_b)
+                type_comparison = self._compare_data_types(meta_a, meta_b)
+                count_comparison = self._compare_row_counts(meta_a, meta_b)
+
+                all_match = (
+                    pk_comparison["match"]
+                    and col_comparison["match"]
+                    and type_comparison["match"]
+                    and count_comparison["match"]
+                )
+
+                results[display_key] = {
+                    "primary_keys": pk_comparison,
+                    "columns": col_comparison,
+                    "data_types": type_comparison,
+                    "row_count": count_comparison,
+                    "status": ComparisonStatus.MATCH if all_match else ComparisonStatus.DIFFER,
+                    "_table_pair": pair,
+                }
+
+                if all_match:
+                    st.success(f"✅ Table `{display_key}`: All metadata matches")
+                else:
+                    st.warning(f"⚠️ Table `{display_key}`: Metadata differences found")
+
+            except Exception as e:
+                st.error(f"❌ Error comparing metadata for `{display_key}`: {str(e)}")
+                results[display_key] = {
+                    "status": ComparisonStatus.ERROR,
+                    "error": str(e),
+                    "_table_pair": pair,
+                }
+
+        return results
+
+    def compare_two_tables(self, table_id_1: str, table_id_2: str) -> Dict[str, Any]:
+        """
+        Compare two specific tables (A vs B).
+
+        Args:
+            table_id_1: First table ID (Production/Base)
+            table_id_2: Second table ID (Test/Target)
+
+        Returns:
+            Comparison results dictionary
+        """
+        st.markdown("## 🔍 Starting Table Comparison (A vs B)")
+        st.info(f"""
+        **Comparing:**
+        - 🔵 Table 1 (Production/Base): `{table_id_1}`
+        - 🟢 Table 2 (Test/Target): `{table_id_2}`
+        """)
+
+        results = {}
+
+        # 1. Bucket Comparison - Skipped
+        results["bucket_comparison"] = {
+            "production_only": [],
+            "test_only": [],
+            "common": [],
+            "status": ComparisonStatus.SKIPPED,
+            "_mode": "tables_direct",
+        }
+
+        # 2. Table Comparison - Mocked structure for consistency
+        # We treat this as a single "common" table pair, even if IDs differ
+        results["table_comparison"] = {
+            "virtual_bucket": {
+                "production_only": [],
+                "test_only": [],
+                "common": [f"{table_id_1} vs {table_id_2}"],
+                "status": ComparisonStatus.MATCH,
+            }
+        }
+
+        # 3. Metadata Comparison
+        st.markdown("---")
+        st.markdown("## Step 1: Metadata Comparison")
+        results["metadata_comparison"] = {}
+
+        # Use a virtual table ID for results
+        virtual_id = f"{table_id_1}_vs_{table_id_2}"
+
+        try:
+            # Fetch from default branch (None) unless we want to support cross-branch + distinct tables later
+            prod_meta = self.client.get_table_detail(table_id_1, branch_id=None)
+            test_meta = self.client.get_table_detail(table_id_2, branch_id=None)
+
+            pk_comparison = self._compare_primary_keys(prod_meta, test_meta)
+            col_comparison = self._compare_columns(prod_meta, test_meta)
+            type_comparison = self._compare_data_types(prod_meta, test_meta)
+            count_comparison = self._compare_row_counts(prod_meta, test_meta)
+
+            all_match = (
+                pk_comparison["match"]
+                and col_comparison["match"]
+                and type_comparison["match"]
+                and count_comparison["match"]
+            )
+
+            results["metadata_comparison"][virtual_id] = {
+                "primary_keys": pk_comparison,
+                "columns": col_comparison,
+                "data_types": type_comparison,
+                "row_count": count_comparison,
+                "status": ComparisonStatus.MATCH if all_match else ComparisonStatus.DIFFER,
+            }
+
+            if all_match:
+                st.success(f"✅ Metadata matches between `{table_id_1}` and `{table_id_2}`")
+            else:
+                st.warning(f"⚠️ Metadata differences found between `{table_id_1}` and `{table_id_2}`")
+
+        except Exception as e:
+            st.error(f"❌ Error comparing metadata: {str(e)}")
+            logger.exception("METADATA ERROR for %s: %s", virtual_id, e)
+            results["metadata_comparison"][virtual_id] = {"status": ComparisonStatus.ERROR, "error": str(e)}
+
+        # 4. Data Comparison
+        st.markdown("---")
+        st.markdown("## Step 2: Row-Level Data Comparison")
+
+        meta = results["metadata_comparison"][virtual_id]
+        if meta.get("status") == ComparisonStatus.ERROR:
+            results["row_differences"] = {virtual_id: {"status": ComparisonStatus.SKIPPED, "reason": "Metadata error"}}
+
+        # Check standard gating (PKs/Columns/Types must match)
+        elif not meta["primary_keys"]["match"] or not meta["columns"]["match"] or not meta["data_types"]["match"]:
+            results["row_differences"] = {
+                virtual_id: {"status": ComparisonStatus.SKIPPED, "reason": "Metadata mismatch (PKs, Columns, or Types)"}
+            }
+            st.info("ℹ️ Skipping row comparison: Critical metadata differs")
+        else:
+            # Check if workspace is available for SQL comparison
+            use_sql = bool(self.client.workspace_id)
+            if not use_sql:
+                st.info("ℹ️ Using pandas-based comparison (no workspace configured). Row limit applies.")
+
+            if use_sql:
+                try:
+                    # Use PK-based SQL comparison (same as bucket comparison)
+                    pks = meta["primary_keys"]["production"]
+                    common_cols = meta["columns"]["common"]
+
+                    # Build queries using the shared method
+                    queries = self._build_sql_comparison_queries(
+                        table_id=virtual_id,
+                        prod_branch=None,
+                        test_branch=None,
+                        columns=common_cols,
+                        primary_keys=pks,
+                        sample_limit=self.SAMPLE_DISPLAY_LIMIT * 20,
+                        prod_table_id=table_id_1,
+                        test_table_id=table_id_2,
+                    )
+
+                    # Execute queries in batch (8 queries)
+                    query_list = [
+                        queries["prod_count"],           # 0
+                        queries["test_count"],           # 1
+                        queries["prod_only_pks_count"],  # 2
+                        queries["test_only_pks_count"],  # 3
+                        queries["value_changes_count"],  # 4
+                        queries["value_changes_sample"], # 5
+                        queries["prod_only_sample"],     # 6
+                        queries["test_only_sample"],     # 7
+                    ]
+                    results_list = self.client.execute_queries_batch(query_list)
+
+                    # Process results using shared method
+                    comparison = self._process_sql_comparison_results(
+                        virtual_id,
+                        prod_count_df=results_list[0],
+                        test_count_df=results_list[1],
+                        prod_only_count_df=results_list[2],
+                        test_only_count_df=results_list[3],
+                        value_changes_count_df=results_list[4],
+                        value_changes_sample_df=results_list[5],
+                        prod_only_sample_df=results_list[6],
+                        test_only_sample_df=results_list[7],
+                        primary_keys=pks,
+                        queries=queries,
+                    )
+
+                    # Display status messages
+                    if comparison["status"] == ComparisonStatus.MATCH:
+                        st.success(f"✅ Data matches perfectly ({comparison['production_row_count']:,} rows)")
+                    else:
+                        st.warning(f"⚠️ Found {comparison['differing_rows']:,} difference(s)")
+
+                    results["row_differences"] = {virtual_id: comparison}
+
+                except Exception as e:
+                    st.warning(f"⚠️ SQL comparison failed, attempting Pandas fallback: {str(e)}")
+                    use_sql = False  # Fall through to pandas comparison
+
+            if not use_sql:
+                try:
+                    # Use pandas data-preview comparison (no workspace required)
+                    preview_limit = self.PREVIEW_ROW_LIMIT
+
+                    # Check for truncation and warn user
+                    prod_row_count = meta.get("row_count", {}).get("production", 0)
+                    test_row_count = meta.get("row_count", {}).get("test", 0)
+                    actual_count = max(prod_row_count, test_row_count)
+                    if preview_limit < actual_count:
+                        st.info(
+                            f"ℹ️ Comparing first {preview_limit:,} rows "
+                            f"(tables have up to {actual_count:,} rows total)."
+                        )
+
+                    prod_data = self.client.get_table_data_preview(table_id_1, branch_id=None, limit=preview_limit)
+                    test_data = self.client.get_table_data_preview(table_id_2, branch_id=None, limit=preview_limit)
+
+                    pks = meta["primary_keys"]["production"]
+
+                    comparison = self._detailed_dataframe_comparison(prod_data, test_data, pks)
+
+                    # Add truncation warning to result if applicable
+                    if preview_limit < actual_count:
+                        comparison["truncation_warning"] = f"Compared {preview_limit:,} of {actual_count:,} rows"
+
+                    results["row_differences"] = {virtual_id: comparison}
+
+                    if comparison.get("status") == ComparisonStatus.MATCH:
+                        st.success(f"✅ Data matches perfectly (Pandas comparison, {len(prod_data)} rows)")
+                    else:
+                        diff_rows = comparison.get("differing_rows", "unknown")
+                        st.warning(f"⚠️ Found differences in data ({diff_rows} rows)")
+
+                except Exception as fallback_e:
+                    st.error(f"❌ Data comparison failed: {str(fallback_e)}")
+                    results["row_differences"] = {virtual_id: {"status": ComparisonStatus.ERROR, "error": str(fallback_e)}}
+
+        # Generate summary
+        st.markdown("---")
+        st.markdown("## 📊 Generating Summary")
+        results["summary"] = self._generate_summary(results)
+
+        st.markdown("---")
+        st.success("✅ Comparison complete!")
+
+        return results
