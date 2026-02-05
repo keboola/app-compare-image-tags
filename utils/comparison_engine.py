@@ -1011,8 +1011,9 @@ class ComparisonEngine:
                 pk_select = ", ".join([f"p.{pk} as {pk}" for pk in pk_cols_sanitized])
                 value_select_parts = []
                 for col in non_pk_cols_sanitized:
-                    value_select_parts.append(f"p.{col} as prod_{col.strip('\"')}")
-                    value_select_parts.append(f"t.{col} as test_{col.strip('\"')}")
+                    col_stripped = col.strip('"')
+                    value_select_parts.append(f"p.{col} as prod_{col_stripped}")
+                    value_select_parts.append(f"t.{col} as test_{col_stripped}")
                 value_select = ", ".join(value_select_parts)
 
                 queries["value_changes_sample"] = f"""
