@@ -5,11 +5,13 @@ This module provides functions for displaying comparison data in various formats
 metrics, charts, tables, and status indicators.
 """
 
-from typing import Any, Dict
+import html
+from typing import Any, Dict, List
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 def display_status_indicator(status: str) -> str:
@@ -564,3 +566,387 @@ def display_log_comparison(log_comparison: Dict[str, Any]):
         with col2:
             with st.expander("Test Events (JSON)"):
                 st.json(log_comparison.get("test_events", []))
+
+
+def _build_diff_rows_html(aligned_diff: List[Dict[str, Any]]) -> Dict[str, str]:
+    """Build HTML rows for production and test panels in synchronized scroll view."""
+    prod_rows = []
+    test_rows = []
+
+    for i, row in enumerate(aligned_diff):
+        status = row.get("status", "match")
+        row_class = {
+            "match": "row-match",
+            "differ": "row-differ",
+            "prod_only": "row-prod-only",
+            "test_only": "row-test-only",
+        }.get(status, "row-match")
+
+        # Production side
+        if row.get("prod_msg") is not None:
+            prod_content = html.escape(str(row["prod_msg"]))
+            prod_line = (row.get("prod_idx") or i) + 1
+            prod_rows.append(
+                f'<div class="log-row {row_class}" data-row="{i}">'
+                f'<span class="line-num">{prod_line}</span>'
+                f'<span class="line-content">{prod_content}</span>'
+                f"</div>"
+            )
+        else:
+            prod_rows.append(
+                f'<div class="log-row row-empty" data-row="{i}">'
+                f'<span class="line-num">-</span>'
+                f'<span class="line-content">(no line)</span>'
+                f"</div>"
+            )
+
+        # Test side
+        if row.get("test_msg") is not None:
+            test_content = html.escape(str(row["test_msg"]))
+            test_line = (row.get("test_idx") or i) + 1
+            test_rows.append(
+                f'<div class="log-row {row_class}" data-row="{i}">'
+                f'<span class="line-num">{test_line}</span>'
+                f'<span class="line-content">{test_content}</span>'
+                f"</div>"
+            )
+        else:
+            test_rows.append(
+                f'<div class="log-row row-empty" data-row="{i}">'
+                f'<span class="line-num">-</span>'
+                f'<span class="line-content">(no line)</span>'
+                f"</div>"
+            )
+
+    return {"production": "\n".join(prod_rows), "test": "\n".join(test_rows)}
+
+
+def render_synchronized_log_viewer(
+    aligned_diff: List[Dict[str, Any]], title: str = "Log Comparison", height: int = 500
+) -> None:
+    """
+    Render a synchronized scrolling side-by-side log viewer.
+
+    Uses custom HTML/CSS/JS embedded via st.components.v1.html() to provide
+    a Beyond Compare-style synchronized scrolling experience.
+
+    Args:
+        aligned_diff: List of aligned diff rows from comparison engine
+        title: Title for the viewer
+        height: Height of the viewer in pixels
+    """
+    if not aligned_diff:
+        st.info("No log data to display")
+        return
+
+    rows_html = _build_diff_rows_html(aligned_diff)
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <style>
+            * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+            body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }}
+            .sync-container {{
+                display: flex;
+                width: 100%;
+                height: {height}px;
+                font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', monospace;
+                font-size: 12px;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                overflow: hidden;
+            }}
+            .log-panel {{
+                flex: 1;
+                overflow-y: auto;
+                background: #fafafa;
+            }}
+            .log-panel:first-child {{
+                border-right: 2px solid #666;
+            }}
+            .panel-header {{
+                position: sticky;
+                top: 0;
+                background: linear-gradient(to bottom, #f0f0f0, #e0e0e0);
+                padding: 10px 12px;
+                font-weight: bold;
+                font-size: 13px;
+                border-bottom: 1px solid #ccc;
+                z-index: 10;
+            }}
+            .panel-header.prod {{ color: #d73a49; }}
+            .panel-header.test {{ color: #28a745; }}
+            .log-content {{
+                padding: 0;
+            }}
+            .log-row {{
+                display: flex;
+                padding: 3px 8px;
+                border-bottom: 1px solid #eee;
+                min-height: 24px;
+                align-items: flex-start;
+            }}
+            .line-num {{
+                min-width: 45px;
+                color: #888;
+                text-align: right;
+                padding-right: 10px;
+                user-select: none;
+                font-size: 11px;
+            }}
+            .line-content {{
+                flex: 1;
+                white-space: pre-wrap;
+                word-break: break-word;
+                line-height: 1.4;
+            }}
+            /* Status-based coloring */
+            .row-match {{ background-color: #fff; }}
+            .row-differ {{ background-color: #fff3cd; }}
+            .row-prod-only {{ background-color: #ffebe9; }}
+            .row-test-only {{ background-color: #d4edda; }}
+            .row-empty {{ background-color: #f5f5f5; color: #999; font-style: italic; }}
+
+            /* Highlight on hover */
+            .log-row:hover {{
+                background-color: #e8f4fc !important;
+            }}
+
+            /* Legend */
+            .legend {{
+                display: flex;
+                gap: 15px;
+                padding: 8px 12px;
+                background: #f8f9fa;
+                border-bottom: 1px solid #ddd;
+                font-size: 11px;
+            }}
+            .legend-item {{
+                display: flex;
+                align-items: center;
+                gap: 5px;
+            }}
+            .legend-color {{
+                width: 14px;
+                height: 14px;
+                border-radius: 2px;
+                border: 1px solid #ccc;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="legend">
+            <div class="legend-item"><div class="legend-color" style="background:#fff;"></div> Match</div>
+            <div class="legend-item"><div class="legend-color" style="background:#fff3cd;"></div> Different</div>
+            <div class="legend-item"><div class="legend-color" style="background:#ffebe9;"></div> Production Only</div>
+            <div class="legend-item"><div class="legend-color" style="background:#d4edda;"></div> Test Only</div>
+        </div>
+        <div class="sync-container">
+            <div class="log-panel" id="panel-prod">
+                <div class="panel-header prod">Production Logs</div>
+                <div class="log-content" id="content-prod">
+                    {rows_html['production']}
+                </div>
+            </div>
+            <div class="log-panel" id="panel-test">
+                <div class="panel-header test">Test Logs</div>
+                <div class="log-content" id="content-test">
+                    {rows_html['test']}
+                </div>
+            </div>
+        </div>
+
+        <script>
+            // Synchronized scrolling
+            const panelProd = document.getElementById('panel-prod');
+            const panelTest = document.getElementById('panel-test');
+
+            let isScrolling = false;
+
+            function syncScroll(source, target) {{
+                if (isScrolling) return;
+                isScrolling = true;
+
+                // Calculate scroll percentage
+                const maxScroll = source.scrollHeight - source.clientHeight;
+                if (maxScroll > 0) {{
+                    const scrollPercent = source.scrollTop / maxScroll;
+                    const targetMaxScroll = target.scrollHeight - target.clientHeight;
+                    target.scrollTop = scrollPercent * targetMaxScroll;
+                }}
+
+                requestAnimationFrame(() => {{ isScrolling = false; }});
+            }}
+
+            panelProd.addEventListener('scroll', () => syncScroll(panelProd, panelTest));
+            panelTest.addEventListener('scroll', () => syncScroll(panelTest, panelProd));
+        </script>
+    </body>
+    </html>
+    """
+
+    components.html(html_content, height=height + 80, scrolling=False)
+
+
+def _display_unified_diff(aligned_diff: List[Dict[str, Any]]) -> None:
+    """Display logs in unified diff format (git-style)."""
+    if not aligned_diff:
+        st.info("No differences to display")
+        return
+
+    for row in aligned_diff:
+        status = row.get("status")
+
+        if status == "match":
+            st.text(f"  {row.get('prod_msg', '')}")
+        elif status == "prod_only":
+            st.markdown(
+                f'<div style="background-color: #ffebe9; padding: 2px 8px; margin: 1px 0; border-radius: 2px;">'
+                f'<code style="color: #d73a49;">- {html.escape(str(row.get("prod_msg", "")))}</code></div>',
+                unsafe_allow_html=True,
+            )
+        elif status == "test_only":
+            st.markdown(
+                f'<div style="background-color: #d4edda; padding: 2px 8px; margin: 1px 0; border-radius: 2px;">'
+                f'<code style="color: #28a745;">+ {html.escape(str(row.get("test_msg", "")))}</code></div>',
+                unsafe_allow_html=True,
+            )
+        elif status == "differ":
+            if row.get("prod_msg"):
+                st.markdown(
+                    f'<div style="background-color: #ffebe9; padding: 2px 8px; margin: 1px 0; border-radius: 2px;">'
+                    f'<code style="color: #d73a49;">- {html.escape(str(row.get("prod_msg", "")))}</code></div>',
+                    unsafe_allow_html=True,
+                )
+            if row.get("test_msg"):
+                st.markdown(
+                    f'<div style="background-color: #d4edda; padding: 2px 8px; margin: 1px 0; border-radius: 2px;">'
+                    f'<code style="color: #28a745;">+ {html.escape(str(row.get("test_msg", "")))}</code></div>',
+                    unsafe_allow_html=True,
+                )
+
+
+def _display_log_section(log_data: Dict[str, Any], title: str, description: str) -> None:
+    """Display a single log comparison section with sync scroll viewer."""
+    st.markdown(f"#### {title}")
+    st.caption(description)
+
+    if not log_data:
+        st.info("No log data available")
+        return
+
+    stats = log_data.get("stats", {})
+    status = log_data.get("status", "unknown")
+
+    # Status banner
+    if status == "match":
+        st.success(f"✅ All {stats.get('total', 0)} log entries match")
+    else:
+        st.warning(
+            f"⚠️ Differences found: {stats.get('matching', 0)} matching, "
+            f"{stats.get('prod_only', 0)} production-only, "
+            f"{stats.get('test_only', 0)} test-only, "
+            f"{stats.get('differing', 0)} different"
+        )
+
+    # View mode selector
+    view_mode = st.radio(
+        "View Mode",
+        ["Synchronized Side-by-Side", "Unified Diff", "Raw Logs"],
+        horizontal=True,
+        key=f"view_mode_{title.replace(' ', '_').lower()}",
+    )
+
+    aligned_diff = log_data.get("aligned_diff", [])
+
+    if view_mode == "Synchronized Side-by-Side":
+        if aligned_diff:
+            render_synchronized_log_viewer(aligned_diff, title, height=400)
+        else:
+            st.info("No aligned diff data available")
+
+    elif view_mode == "Unified Diff":
+        _display_unified_diff(aligned_diff)
+
+    elif view_mode == "Raw Logs":
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Production Logs**")
+            for i, msg in enumerate(log_data.get("production_messages", [])[:100], 1):
+                st.text(f"{i:4d} | {msg}")
+            if len(log_data.get("production_messages", [])) > 100:
+                st.caption("... (showing first 100 messages)")
+        with col2:
+            st.markdown("**Test Logs**")
+            for i, msg in enumerate(log_data.get("test_messages", [])[:100], 1):
+                st.text(f"{i:4d} | {msg}")
+            if len(log_data.get("test_messages", [])) > 100:
+                st.caption("... (showing first 100 messages)")
+
+
+def display_log_comparison_v2(log_comparison: Dict[str, Any]) -> None:
+    """
+    Display enhanced log comparison with separate sections for storage and component logs.
+
+    This provides a synchronized scrolling side-by-side view similar to Beyond Compare.
+
+    Args:
+        log_comparison: Log comparison dictionary from comparison engine
+    """
+    if not log_comparison or log_comparison.get("status") == "error":
+        st.error(f"❌ Log comparison failed: {log_comparison.get('error', 'Unknown error')}")
+        return
+
+    # Get stats
+    component_stats = log_comparison.get("component_logs", {}).get("stats", {})
+    storage_events_stats = log_comparison.get("storage_events", {}).get("stats", {})
+
+    # Overview metrics
+    st.markdown("### Log Comparison Overview")
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Component Logs (Prod)", component_stats.get("production_count", 0))
+    with col2:
+        st.metric("Component Logs (Test)", component_stats.get("test_count", 0))
+    with col3:
+        st.metric("Storage Events (Prod)", storage_events_stats.get("production_count", 0))
+    with col4:
+        st.metric("Storage Events (Test)", storage_events_stats.get("test_count", 0))
+
+    st.markdown("---")
+
+    # Check if we have any component logs
+    has_component_logs = component_stats.get("production_count", 0) > 0 or component_stats.get("test_count", 0) > 0
+
+    # Tab navigation - show Component Logs only if available
+    if has_component_logs:
+        tab1, tab2 = st.tabs(["Component Logs", "Storage Events"])
+
+        with tab1:
+            _display_log_section(
+                log_comparison.get("component_logs", {}),
+                "Component Logs",
+                "STDOUT/STDERR output from the component container",
+            )
+
+        with tab2:
+            _display_log_section(
+                log_comparison.get("storage_events", {}),
+                "Storage Events",
+                "Storage API events (table loads, metadata changes)",
+            )
+    else:
+        # Only Storage Events tab when no component logs
+        st.info(
+            "ℹ️ **Component Logs not available.** "
+            "This may be due to event retention (events are kept for 6 months) or token permissions. "
+            "Showing Storage Events below."
+        )
+        _display_log_section(
+            log_comparison.get("storage_events", {}),
+            "Storage Events",
+            "Storage API events (table loads, metadata changes)",
+        )

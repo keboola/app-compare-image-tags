@@ -958,15 +958,22 @@ class KeboolaAPIClient:
         Returns:
             List of event dictionaries containing log messages
         """
-        # First get the job to extract the runId
+        # First get the job to extract the runId and branchId
         job_status = self.get_job_status(job_id)
         run_id = job_status.get("runId")
+        branch_id = job_status.get("branchId")
 
         if not run_id:
             raise ValueError(f"Job {job_id} does not have a runId")
 
-        # Query events using runId
-        url = f"{self.storage_url}/v2/storage/events"
+        # Use branch-specific endpoint if branchId is available
+        # This is required to get events - the non-branch endpoint returns empty
+        if branch_id:
+            url = f"{self.storage_url}/v2/storage/branch/{branch_id}/events"
+        else:
+            # Fallback to default branch events endpoint
+            url = f"{self.storage_url}/v2/storage/events"
+
         params = {"runId": run_id, "limit": limit}
 
         response = requests.get(url, headers=self.headers, params=params)
@@ -974,6 +981,93 @@ class KeboolaAPIClient:
 
         events = response.json()
         return events
+
+    def get_storage_jobs(self, limit: int = 200) -> List[Dict[str, Any]]:
+        """
+        Get storage jobs (table operations like create, import, etc.).
+
+        Args:
+            limit: Maximum number of jobs to retrieve (default 200)
+
+        Returns:
+            List of storage job dictionaries
+        """
+        url = f"{self.storage_url}/v2/storage/jobs"
+        params = {"limit": limit}
+
+        response = requests.get(url, headers=self.headers, params=params)
+        response.raise_for_status()
+
+        return response.json()
+
+    def get_storage_jobs_for_run(self, run_id: str, limit: int = 200) -> List[Dict[str, Any]]:
+        """
+        Get storage jobs for a specific component run.
+
+        Storage jobs track individual table operations (create, import, etc.)
+        that occurred during a component run. Each job has operation details,
+        metrics, and results.
+
+        Args:
+            run_id: The runId from the component job
+            limit: Maximum number of jobs to retrieve (default 200)
+
+        Returns:
+            List of storage job dictionaries for the given run
+        """
+        all_jobs = self.get_storage_jobs(limit=limit)
+        # Filter by runId client-side (API doesn't support runId filter)
+        return [job for job in all_jobs if job.get("runId") == str(run_id)]
+
+    def get_job_logs_categorized(
+        self, job_id: str, limit: int = 1000
+    ) -> Dict[str, Any]:
+        """
+        Get categorized logs for a job: storage event logs and component logs.
+
+        Storage logs are events with event type starting with 'storage.'
+        (table loads, metadata changes, etc.)
+        Component logs are other events (STDOUT/STDERR from container).
+
+        Args:
+            job_id: Job ID
+            limit: Maximum number of events to retrieve (default 1000)
+
+        Returns:
+            Dictionary with:
+                - storage_logs: List of storage operation events (storage.*)
+                - component_logs: List of component output events (non-storage, non-job)
+                - all_events: List of all raw events
+                - run_id: The runId for this job
+        """
+        # Get the runId from job status
+        job_status = self.get_job_status(job_id)
+        run_id = job_status.get("runId")
+
+        if not run_id:
+            raise ValueError(f"Job {job_id} does not have a runId")
+
+        # Get events (component STDOUT/STDERR logs + storage events)
+        events = self.get_job_events(job_id, limit=limit)
+
+        # Categorize events
+        storage_logs = []
+        component_logs = []
+
+        for event in events:
+            event_type = event.get("event", "")
+            if event_type.startswith("storage."):
+                storage_logs.append(event)
+            elif not event_type.startswith("job."):
+                # Exclude job lifecycle events, keep component logs
+                component_logs.append(event)
+
+        return {
+            "storage_logs": storage_logs,
+            "component_logs": component_logs,
+            "all_events": events,
+            "run_id": run_id,
+        }
 
     # ==================== Data Queries ====================
 

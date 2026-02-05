@@ -11,6 +11,7 @@ This module implements comprehensive comparison logic across multiple levels:
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from difflib import SequenceMatcher
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1490,9 +1491,146 @@ class ComparisonEngine:
             logger.exception("PANDAS FALLBACK ERROR: %s", e)
             return {"status": ComparisonStatus.ERROR, "error": str(e), "message": "Failed to compare DataFrames"}
 
+    def _align_log_sequences(
+        self, prod_messages: List[str], test_messages: List[str]
+    ) -> List[Dict[str, Any]]:
+        """
+        Align two log sequences for side-by-side comparison using SequenceMatcher.
+
+        Args:
+            prod_messages: List of production log messages
+            test_messages: List of test log messages
+
+        Returns:
+            List of aligned row dictionaries with status
+        """
+        matcher = SequenceMatcher(None, prod_messages, test_messages)
+        aligned = []
+
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag == "equal":
+                for i, j in zip(range(i1, i2), range(j1, j2)):
+                    aligned.append(
+                        {
+                            "prod_idx": i,
+                            "test_idx": j,
+                            "prod_msg": prod_messages[i],
+                            "test_msg": test_messages[j],
+                            "status": "match",
+                        }
+                    )
+            elif tag == "replace":
+                # Lines changed - show side by side
+                max_len = max(i2 - i1, j2 - j1)
+                for k in range(max_len):
+                    prod_idx = i1 + k if k < (i2 - i1) else None
+                    test_idx = j1 + k if k < (j2 - j1) else None
+                    aligned.append(
+                        {
+                            "prod_idx": prod_idx,
+                            "test_idx": test_idx,
+                            "prod_msg": prod_messages[prod_idx] if prod_idx is not None else None,
+                            "test_msg": test_messages[test_idx] if test_idx is not None else None,
+                            "status": "differ",
+                        }
+                    )
+            elif tag == "delete":
+                for i in range(i1, i2):
+                    aligned.append(
+                        {
+                            "prod_idx": i,
+                            "test_idx": None,
+                            "prod_msg": prod_messages[i],
+                            "test_msg": None,
+                            "status": "prod_only",
+                        }
+                    )
+            elif tag == "insert":
+                for j in range(j1, j2):
+                    aligned.append(
+                        {
+                            "prod_idx": None,
+                            "test_idx": j,
+                            "prod_msg": None,
+                            "test_msg": test_messages[j],
+                            "status": "test_only",
+                        }
+                    )
+
+        return aligned
+
+    def _compare_log_category(
+        self, prod_logs: List[Dict], test_logs: List[Dict], log_type: str
+    ) -> Dict[str, Any]:
+        """
+        Compare a single category of logs (storage or component).
+
+        Args:
+            prod_logs: Production logs (events or storage jobs)
+            test_logs: Test logs (events or storage jobs)
+            log_type: Type of logs for message extraction ("events" or "storage_jobs")
+
+        Returns:
+            Comparison result for this log category
+        """
+        # Extract messages based on log type
+        if log_type == "storage_jobs":
+            # For storage jobs, create descriptive message from operation
+            prod_messages = [
+                f"{job.get('operationName', 'unknown')}: "
+                f"{job.get('results', {}).get('name', job.get('results', {}).get('id', 'N/A')) if job.get('results') else 'N/A'}"
+                for job in prod_logs
+            ]
+            test_messages = [
+                f"{job.get('operationName', 'unknown')}: "
+                f"{job.get('results', {}).get('name', job.get('results', {}).get('id', 'N/A')) if job.get('results') else 'N/A'}"
+                for job in test_logs
+            ]
+        else:
+            # For events, extract message field
+            prod_messages = [e.get("message", "") for e in prod_logs if e.get("message")]
+            test_messages = [e.get("message", "") for e in test_logs if e.get("message")]
+
+        # Align sequences for side-by-side comparison
+        aligned_diff = self._align_log_sequences(prod_messages, test_messages)
+
+        # Calculate statistics
+        matching = sum(1 for r in aligned_diff if r["status"] == "match")
+        prod_only = sum(1 for r in aligned_diff if r["status"] == "prod_only")
+        test_only = sum(1 for r in aligned_diff if r["status"] == "test_only")
+        differing = sum(1 for r in aligned_diff if r["status"] == "differ")
+
+        # Determine overall status
+        if prod_only == 0 and test_only == 0 and differing == 0:
+            status = ComparisonStatus.MATCH
+        else:
+            status = ComparisonStatus.DIFFER
+
+        return {
+            "production_logs": prod_logs,
+            "test_logs": test_logs,
+            "production_messages": prod_messages,
+            "test_messages": test_messages,
+            "aligned_diff": aligned_diff,
+            "stats": {
+                "production_count": len(prod_messages),
+                "test_count": len(test_messages),
+                "total": len(aligned_diff),
+                "matching": matching,
+                "prod_only": prod_only,
+                "test_only": test_only,
+                "differing": differing,
+            },
+            "status": status,
+        }
+
     def _compare_job_logs(self) -> Optional[Dict[str, Any]]:
         """
         Compare job logs/events between production and test runs.
+
+        Compares two categories of logs:
+        1. Component logs: STDOUT/STDERR from the component container
+        2. Storage jobs: Table operations (create, import, etc.)
 
         Returns:
             Log comparison results dictionary or None if not applicable
@@ -1508,90 +1646,97 @@ class ComparisonEngine:
             return None
 
         try:
-            # Fetch job events/logs
+            # Fetch categorized logs for both jobs
             st.info(f"Fetching logs for production job: {prod_job_id}")
-            prod_events = self.client.get_job_events(prod_job_id)
+            prod_logs = self.client.get_job_logs_categorized(prod_job_id)
 
             st.info(f"Fetching logs for test job: {test_job_id}")
-            test_events = self.client.get_job_events(test_job_id)
+            test_logs = self.client.get_job_logs_categorized(test_job_id)
 
-            # Show debug info about event types
-            prod_event_types = {}
-            for event in prod_events:
-                event_type = event.get("event", "unknown")
-                prod_event_types[event_type] = prod_event_types.get(event_type, 0) + 1
-
-            st.info(f"Production event types: {prod_event_types}")
-
-            test_event_types = {}
-            for event in test_events:
-                event_type = event.get("event", "unknown")
-                test_event_types[event_type] = test_event_types.get(event_type, 0) + 1
-
-            st.info(f"Test event types: {test_event_types}")
-
-            # Show sample events in advanced mode
+            # Show debug info about event types in advanced mode
             if st.session_state.get("show_advanced", False):
-                with st.expander("🔧 Sample Production Event (first non-storage event)"):
-                    for event in prod_events[:20]:  # Check first 20
-                        if not event.get("event", "").startswith("storage."):
-                            st.json(event)
-                            break
+                prod_event_types = {}
+                for event in prod_logs.get("all_events", []):
+                    event_type = event.get("event", "unknown")
+                    prod_event_types[event_type] = prod_event_types.get(event_type, 0) + 1
+                st.info(f"Production event types: {prod_event_types}")
 
-                with st.expander("🔧 Sample Test Event (first non-storage event)"):
-                    for event in test_events[:20]:
-                        if not event.get("event", "").startswith("storage."):
-                            st.json(event)
-                            break
+                test_event_types = {}
+                for event in test_logs.get("all_events", []):
+                    event_type = event.get("event", "unknown")
+                    test_event_types[event_type] = test_event_types.get(event_type, 0) + 1
+                st.info(f"Test event types: {test_event_types}")
 
-            # Filter to only component output logs (typically "info" events with component output)
-            # Skip system events like "storage.*", "job.*", etc.
-            def is_component_log(event):
-                event_type = event.get("event", "")
-                # Include only standard log events, exclude storage/system events
-                return not event_type.startswith(("storage.", "job."))
-
-            prod_log_events = [e for e in prod_events if is_component_log(e)]
-            test_log_events = [e for e in test_events if is_component_log(e)]
-
-            # Extract log messages from filtered events
-            prod_messages = [event.get("message", "") for event in prod_log_events if event.get("message")]
-            test_messages = [event.get("message", "") for event in test_log_events if event.get("message")]
-
-            st.success(
-                f"✅ Fetched {len(prod_messages)} production log messages and {len(test_messages)} test log messages (filtered from {len(prod_events)} and {len(test_events)} total events)"
+            # Compare component logs (STDOUT/STDERR from container)
+            component_comparison = self._compare_log_category(
+                prod_logs.get("component_logs", []),
+                test_logs.get("component_logs", []),
+                "events",
             )
 
-            # Compare log messages
-            prod_set = set(prod_messages)
-            test_set = set(test_messages)
+            # Compare storage event logs (table loads, metadata changes)
+            storage_events_comparison = self._compare_log_category(
+                prod_logs.get("storage_logs", []),
+                test_logs.get("storage_logs", []),
+                "events",
+            )
 
-            common_messages = sorted(prod_set & test_set)
-            prod_only_messages = sorted(prod_set - test_set)
-            test_only_messages = sorted(test_set - prod_set)
+            # Log summary
+            comp_stats = component_comparison["stats"]
+            storage_events_stats = storage_events_comparison["stats"]
+            st.success(
+                f"✅ Fetched logs - Component: {comp_stats['production_count']} prod / {comp_stats['test_count']} test | "
+                f"Storage Events: {storage_events_stats['production_count']} prod / {storage_events_stats['test_count']} test"
+            )
 
-            # Build detailed comparison
+            # Determine overall status based on storage events (component logs may be empty)
+            overall_status = ComparisonStatus.MATCH
+            if storage_events_comparison["status"] != ComparisonStatus.MATCH:
+                overall_status = ComparisonStatus.DIFFER
+            # Only consider component logs if they exist
+            if comp_stats["production_count"] > 0 or comp_stats["test_count"] > 0:
+                if component_comparison["status"] != ComparisonStatus.MATCH:
+                    overall_status = ComparisonStatus.DIFFER
+
+            # Build result (backward compatible + new structure)
             result = {
                 "production_job_id": prod_job_id,
                 "test_job_id": test_job_id,
-                "production_message_count": len(prod_messages),
-                "test_message_count": len(test_messages),
-                "production_unique_message_count": len(prod_set),
-                "test_unique_message_count": len(test_set),
-                "common_messages": common_messages,
-                "production_only_messages": prod_only_messages,
-                "test_only_messages": test_only_messages,
-                "production_events": prod_events,  # Full event data
-                "test_events": test_events,  # Full event data
-                "status": ComparisonStatus.MATCH if prod_set == test_set else ComparisonStatus.DIFFER,
+                # New categorized structure
+                "component_logs": component_comparison,
+                "storage_events": storage_events_comparison,
+                # Backward compatible fields
+                "production_message_count": comp_stats["production_count"],
+                "test_message_count": comp_stats["test_count"],
+                "production_unique_message_count": len(set(component_comparison["production_messages"])),
+                "test_unique_message_count": len(set(component_comparison["test_messages"])),
+                "common_messages": [
+                    r["prod_msg"] for r in component_comparison["aligned_diff"] if r["status"] == "match"
+                ],
+                "production_only_messages": [
+                    r["prod_msg"]
+                    for r in component_comparison["aligned_diff"]
+                    if r["status"] in ("prod_only", "differ") and r["prod_msg"]
+                ],
+                "test_only_messages": [
+                    r["test_msg"]
+                    for r in component_comparison["aligned_diff"]
+                    if r["status"] in ("test_only", "differ") and r["test_msg"]
+                ],
+                "production_events": prod_logs.get("all_events", []),
+                "test_events": test_logs.get("all_events", []),
+                "status": overall_status,
             }
 
-            if result["status"] == ComparisonStatus.MATCH:
+            if overall_status == ComparisonStatus.MATCH:
                 st.success("✅ Job logs match perfectly")
             else:
-                st.warning(
-                    f"⚠️ Job logs differ: {len(prod_only_messages)} production-only, {len(test_only_messages)} test-only"
-                )
+                storage_diff = storage_events_stats["prod_only"] + storage_events_stats["test_only"] + storage_events_stats["differing"]
+                if comp_stats["production_count"] > 0 or comp_stats["test_count"] > 0:
+                    comp_diff = comp_stats["prod_only"] + comp_stats["test_only"] + comp_stats["differing"]
+                    st.warning(f"⚠️ Job logs differ: {comp_diff} component log differences, {storage_diff} storage event differences")
+                else:
+                    st.warning(f"⚠️ Storage events differ: {storage_diff} differences found")
 
             return result
 

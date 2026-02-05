@@ -12,6 +12,7 @@ import streamlit as st
 from utils.visualization import (
     display_bucket_comparison,
     display_log_comparison,
+    display_log_comparison_v2,
     display_metadata_differences,
     display_row_differences,
     display_summary_metrics,
@@ -330,6 +331,9 @@ def display_log_comparison_tab(results: dict):
     """
     Display job log comparison tab.
 
+    Uses the new synchronized scrolling view (v2) when available,
+    falls back to the original view for backward compatibility.
+
     Args:
         results: Full comparison results dictionary
     """
@@ -353,5 +357,10 @@ def display_log_comparison_tab(results: dict):
 
     st.markdown("---")
 
-    # Display log comparison
-    display_log_comparison(log_comparison)
+    # Use new synchronized scroll view if new format is available
+    # (detected by presence of "component_logs" key from updated comparison engine)
+    if "component_logs" in log_comparison:
+        display_log_comparison_v2(log_comparison)
+    else:
+        # Fallback to old display for backward compatibility
+        display_log_comparison(log_comparison)
