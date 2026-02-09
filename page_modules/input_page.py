@@ -7,6 +7,7 @@ This page allows users to choose between three comparison modes:
 3. Bucket Comparison - Compare all tables in specific buckets
 """
 
+import requests
 import streamlit as st
 
 from utils.keboola_client import KeboolaAPIClient, parse_bucket_url, parse_workspace_url, validate_workspace
@@ -30,8 +31,8 @@ def create_input_page():
         return
 
     # Select comparison mode
-    modes = ["🔧 Configuration", "📊 Tables", "🗂️ Buckets"]
-    mode_map = {"config": 0, "tables": 1, "buckets": 2}
+    modes = ["🔧 Configuration", "🧩 Component", "📊 Tables", "🗂️ Buckets"]
+    mode_map = {"config": 0, "component": 1, "tables": 2, "buckets": 3}
 
     # Determine default index
     current_mode = st.session_state.get("comparison_mode")
@@ -53,11 +54,13 @@ def create_input_page():
 
     st.markdown("---")
 
-    if selected_mode_label == modes[0]:
+    if selected_mode_label == modes[0]:  # Configuration
         create_config_comparison_form()
-    elif selected_mode_label == modes[1]:
+    elif selected_mode_label == modes[1]:  # Component
+        create_component_comparison_form()
+    elif selected_mode_label == modes[2]:  # Tables
         create_table_comparison_form()
-    elif selected_mode_label == modes[2]:
+    elif selected_mode_label == modes[3]:  # Buckets
         create_bucket_comparison_form()
 
 
@@ -82,6 +85,21 @@ def display_validated_input():
         st.info(f"**Comparison Mode:** {comparison_mode_label}")
         if not workspace_id:
             st.info(f"**Row Limit:** {row_limit:,}")
+
+    elif mode == "component":
+        st.success("✅ Component Comparison Mode")
+        st.info(f"**Component:** {st.session_state['target_component_id']}")
+        discovered_configs = st.session_state.get("discovered_configs", [])
+        st.info(f"**Discovered Configurations:** {len(discovered_configs)}")
+        st.info(f"**Production Tag:** {st.session_state['production_image_tag']}")
+        st.info(f"**Test Tag:** {st.session_state['test_image_tag']}")
+        st.info(f"**Job Mode:** {st.session_state.get('job_mode', 'run')}")
+        st.info(f"**Comparison Mode:** {comparison_mode_label}")
+        if not workspace_id:
+            st.info(f"**Row Limit:** {row_limit:,}")
+        with st.expander("View discovered configurations"):
+            for cfg in discovered_configs:
+                st.text(f"  • {cfg['name']} (ID: {cfg['id']})")
 
     elif mode == "tables":
         st.success("✅ Table Comparison Mode")
@@ -166,6 +184,13 @@ def clear_input_session_state():
         "production_config_updated",
         "test_config_updated",
         "jobs_completion_logged",
+        # Component mode fields
+        "target_component_id",
+        # "component_url",         <-- KEEP (raw input)
+        "discovered_configs",
+        "config_execution_states",
+        "component_setup_complete",
+        "all_jobs_triggered",
         # Logs
         "branch_creation_logs",
         "config_production_logs",
@@ -288,9 +313,261 @@ def create_config_comparison_form():
             st.error("❌ Invalid configuration ID or URL format")
             return
 
+        # Check if user pasted a component URL (no config ID at the end)
+        # Component URLs end with /components/{component_id}
+        # Config URLs end with /components/{component_id}/{config_id}
+        if config_input.startswith("http") and config_id.startswith("keboola."):
+            st.error("❌ This looks like a **Component URL**, not a Configuration URL")
+            st.info("💡 To compare ALL configurations for a component, select **🧩 Component** mode above.")
+            st.info("For Configuration mode, paste a URL that includes the configuration ID at the end.")
+            return
+
         validate_config_comparison(
             config_id, component_id, config_input, production_tag, test_tag, branch_name, user_token, auto_run, job_mode, workspace_url
         )
+
+
+def create_component_comparison_form():
+    """Create form for component comparison mode."""
+    show_advanced = st.session_state.get("show_advanced", False)
+
+    st.markdown("### Compare All Configurations for a Component")
+    st.caption("Runs ALL production configurations for a component with different image tags and compares outputs.")
+    with st.expander("How this works", expanded=show_advanced):
+        st.markdown("""
+        The app will:
+        1. Discover all configurations for the specified component
+        2. For each configuration:
+           - Create two development branches (one for production tag, one for test tag)
+           - Update configurations with different image tags
+           - Run both configurations in parallel
+        3. Compare all outputs from all configurations
+        """)
+
+    with st.form("component_input_form"):
+        user_token = st.text_input(
+            "Keboola Admin Token",
+            type="password",
+            value=st.session_state.get("user_token", ""),
+            key="user_token_component",
+            help="Your Keboola admin token (must have permissions to create development branches)",
+            placeholder="Enter your admin token here",
+        )
+
+        component_url = st.text_input(
+            "Component URL",
+            value=st.session_state.get("component_url", ""),
+            key="widget_component_url",
+            help="Full component URL from Keboola (e.g., https://connection.keboola.com/admin/projects/123/components/keboola.ex-facebook-ads-v2)",
+            placeholder="e.g., https://connection.us-east4.gcp.keboola.com/admin/projects/4214/components/keboola.ex-facebook-ads-v2",
+        )
+
+        workspace_url = st.text_input(
+            "Workspace URL (Optional)",
+            value=st.session_state.get("workspace_url", ""),
+            key="widget_workspace_url_component",
+            help=(
+                "Optional: Your Keboola workspace URL. If provided, enables full SQL-level comparison of tables. "
+                "Without this, comparisons use a row limit and in-app comparison (safer for large tables). "
+                "Find it in Keboola: Workspaces > your workspace > copy URL from browser."
+            ),
+            placeholder="e.g., https://connection.keboola.com/admin/projects/12345/workspaces/01kg4cky9chn32aqaxq7ejnrzj",
+        )
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            production_tag = st.text_input(
+                "Production Image Tag",
+                value=st.session_state.get("production_image_tag", "latest"),
+                key="widget_production_image_tag_component",
+                help="Current/production image tag to compare from (default: 'latest')",
+                placeholder="e.g., latest",
+            )
+
+        with col2:
+            test_tag = st.text_input(
+                "Test Image Tag",
+                value=st.session_state.get("test_image_tag", ""),
+                key="widget_test_image_tag_component",
+                help="New image tag to test against production",
+                placeholder="e.g., 2.0.0",
+            )
+
+        branch_name = st.text_input(
+            "Branch Name Prefix (optional)",
+            value=st.session_state.get("branch_name", "comparison-test"),
+            key="widget_branch_name_component",
+            help="Prefix for dev branches (will append config ID to make unique)",
+        )
+
+        job_mode = st.selectbox(
+            "Job Mode",
+            options=["run", "debug"],
+            index=0 if st.session_state.get("job_mode", "run") == "run" else 1,
+            key="widget_job_mode_component",
+            help="'run' executes normally, 'debug' provides more detailed logs but may behave differently",
+        )
+
+        st.markdown("---")
+
+        auto_run = st.checkbox(
+            "🚀 Auto-run to completion",
+            value=st.session_state.get("auto_run", False),
+            help="Automatically execute all steps without manual clicks (create branches, run jobs, wait for completion, run comparison)",
+        )
+
+        submitted = st.form_submit_button("Discover Configurations & Start", type="primary")
+
+    if submitted:
+        if not user_token:
+            st.error("❌ Please provide your Keboola Admin Token")
+            return
+
+        if not component_url:
+            st.error("❌ Please provide Component URL")
+            return
+
+        if not production_tag or not test_tag:
+            st.error("❌ Please provide both Production and Test image tags")
+            return
+
+        # Parse component URL
+        parsed = parse_component_url(component_url)
+        if not parsed:
+            st.error("❌ Invalid component URL format. Expected: https://connection.../admin/projects/{project_id}/components/{component_id}")
+            return
+
+        kbc_url = parsed["base_url"]
+        component_id = parsed["component_id"]
+
+        validate_component_comparison(
+            user_token, kbc_url, component_id, production_tag, test_tag,
+            branch_name, auto_run, job_mode, workspace_url, component_url
+        )
+
+
+def validate_component_comparison(
+    user_token: str,
+    kbc_url: str,
+    component_id: str,
+    production_tag: str,
+    test_tag: str,
+    branch_name: str,
+    auto_run: bool,
+    job_mode: str = "run",
+    workspace_url: str = "",
+    component_url: str = "",
+):
+    """
+    Validate component comparison inputs and prepare for execution.
+
+    Args:
+        user_token: Keboola admin token
+        kbc_url: Keboola connection URL
+        component_id: Component ID to discover configurations for
+        production_tag: Production image tag
+        test_tag: Test image tag
+        branch_name: Branch name prefix
+        auto_run: Whether to automatically run all steps
+        job_mode: Job execution mode - "run" (default) or "debug"
+        workspace_url: Optional workspace URL for SQL-level comparisons
+        component_url: Original component URL for session state storage
+    """
+    with st.spinner("Discovering configurations for component..."):
+        try:
+            # Validate workspace URL if provided (fail fast)
+            workspace_id = None
+            if workspace_url and workspace_url.strip():
+                try:
+                    ws_base_url, ws_config_id = parse_workspace_url(workspace_url)
+                    # Validate workspace exists
+                    workspace_data = validate_workspace(
+                        kbc_url,
+                        user_token,
+                        ws_config_id
+                    )
+                    workspace_id = str(workspace_data["id"])
+                    st.success(f"✅ Workspace validated: **{workspace_data.get('name', 'Unknown')}**")
+                except ValueError as e:
+                    st.error(f"❌ Invalid workspace URL: {str(e)}")
+                    return
+
+            client = KeboolaAPIClient(token_override=user_token, kbc_url_override=kbc_url, workspace_id=workspace_id)
+
+            # Discover all configurations for this component
+            configs = client.list_component_configs(component_id)
+
+            if not configs:
+                st.error(f"❌ No configurations found for component: {component_id}")
+                st.info("Please verify the component ID and try again.")
+                return
+
+            st.success(f"✅ Found **{len(configs)}** configuration(s) for component: **{component_id}**")
+
+            # Display found configurations
+            with st.expander("View discovered configurations", expanded=True):
+                for cfg in configs:
+                    st.markdown(f"- **{cfg['name']}** (ID: `{cfg['id']}`)")
+
+            # Initialize config execution states
+            config_execution_states = []
+            for cfg in configs:
+                config_execution_states.append({
+                    "config_id": cfg["id"],
+                    "config_name": cfg["name"],
+                    "original_config": cfg,
+                    "production_branch_id": None,
+                    "test_branch_id": None,
+                    "production_config_updated": False,
+                    "test_config_updated": False,
+                    "production_job_id": None,
+                    "test_job_id": None,
+                    "production_job_status": None,
+                    "test_job_status": None,
+                })
+
+            # Store in session state
+            st.session_state.comparison_mode = "component"
+            st.session_state.input_validated = True
+            st.session_state.user_token = user_token
+            st.session_state.kbc_url = kbc_url
+            st.session_state.target_component_id = component_id
+            st.session_state.component_url = component_url
+            st.session_state.discovered_configs = configs
+            st.session_state.config_execution_states = config_execution_states
+            st.session_state.production_image_tag = production_tag
+            st.session_state.test_image_tag = test_tag
+            st.session_state.branch_name = branch_name
+            st.session_state.auto_run = auto_run
+            st.session_state.job_mode = job_mode
+            st.session_state.workspace_url = workspace_url
+            st.session_state.workspace_id = workspace_id
+            st.session_state.component_setup_complete = False
+            st.session_state.all_jobs_triggered = False
+
+            st.success("✅ Component configurations discovered successfully!")
+            if auto_run:
+                st.success("🚀 Auto-run enabled - will proceed automatically to completion")
+            else:
+                st.info("👉 Navigate to **⚙️ Execution** in the sidebar to continue")
+
+            # Brief pause before rerun to show success messages
+            import time
+            time.sleep(1)
+            st.rerun()
+
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404:
+                st.error(f"❌ Component not found: {component_id}")
+                st.info("Please verify the component ID and try again.")
+            else:
+                st.error(f"❌ API error: {str(e)}")
+            return
+
+        except Exception as e:
+            st.error(f"❌ Failed to discover configurations: {str(e)}")
+            st.exception(e)
 
 
 def create_table_comparison_form():
@@ -511,6 +788,57 @@ def parse_config_url(input_str: str) -> tuple:
 
     # Otherwise, treat as direct config ID
     return (input_str, None)
+
+
+def parse_component_url(url: str) -> dict:
+    """
+    Parse a Keboola component URL to extract base URL and component ID.
+
+    Args:
+        url: Full component URL like:
+            https://connection.us-east4.gcp.keboola.com/admin/projects/4214/components/keboola.ex-facebook-ads-v2
+
+    Returns:
+        Dict with keys: base_url, component_id, project_id
+        Or None if URL format is invalid
+    """
+    url = url.strip()
+
+    if not url.startswith(("http://", "https://")):
+        return None
+
+    # Parse URL parts
+    parts = url.rstrip("/").split("/")
+
+    # Find components index
+    try:
+        comp_idx = parts.index("components")
+        if comp_idx + 1 < len(parts):
+            component_id = parts[comp_idx + 1]
+
+            # Extract base URL (scheme + netloc)
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            base_url = f"{parsed.scheme}://{parsed.netloc}"
+
+            # Extract project ID
+            project_id = None
+            try:
+                proj_idx = parts.index("projects")
+                if proj_idx + 1 < len(parts):
+                    project_id = parts[proj_idx + 1]
+            except ValueError:
+                pass
+
+            return {
+                "base_url": base_url,
+                "component_id": component_id,
+                "project_id": project_id,
+            }
+    except ValueError:
+        pass
+
+    return None
 
 
 def validate_config_comparison(

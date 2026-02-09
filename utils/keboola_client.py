@@ -333,6 +333,25 @@ class KeboolaAPIClient:
 
         raise ValueError(f"Configuration {config_id} not found in any component")
 
+    def list_component_configs(self, component_id: str) -> List[Dict[str, Any]]:
+        """
+        List all configurations for a specific component.
+
+        Args:
+            component_id: Component ID (e.g., 'keboola.ex-facebook-ads-v2')
+
+        Returns:
+            List of configuration dictionaries
+        """
+        url = f"{self.storage_url}/v2/storage/components/{component_id}/configs"
+        response = requests.get(url, headers=self.headers)
+        response.raise_for_status()
+
+        configs = response.json()
+        for config in configs:
+            config["component"] = component_id
+        return configs
+
     def create_configuration(
         self, component_id: str, name: str, description: str, configuration: Dict, branch_id: Optional[str] = None
     ) -> Dict[str, Any]:
