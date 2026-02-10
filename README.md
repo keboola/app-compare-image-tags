@@ -39,7 +39,7 @@ This tool automates the validation of component upgrades by:
 
 1. **Clone the repository:**
    ```bash
-   git clone <repository-url>
+   git clone https://github.com/keboola/app-compare-image-tags.git
    cd app-compare-image-tags
    ```
 
