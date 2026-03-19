@@ -94,6 +94,35 @@ def create_results_page():
                 st.text(f"Image Tag: {st.session_state.get('test_image_tag')}")
                 st.text(f"Branch: {st.session_state.get('branch_name')}-test")
 
+        elif comparison_mode == "component":
+            st.markdown("**Comparison Mode:** Component Comparison")
+            st.markdown(f"**Component:** `{st.session_state.get('target_component_id')}`")
+            st.markdown(f"**Production Tag:** {st.session_state.get('production_image_tag')}")
+            st.markdown(f"**Test Tag:** {st.session_state.get('test_image_tag')}")
+
+            # Show per-config results summary
+            per_config_results = results.get("per_config_results", {})
+            configs_compared = len(per_config_results)
+            configs_success = sum(1 for r in per_config_results.values() if r.get("status") == "success")
+            configs_failed = sum(1 for r in per_config_results.values() if r.get("status") == "error")
+
+            st.markdown(f"**Configurations Compared:** {configs_compared}")
+            if configs_failed > 0:
+                st.markdown(f"**Successful:** {configs_success}, **Failed:** {configs_failed}")
+
+            with st.expander("View per-configuration results"):
+                for config_id, result in per_config_results.items():
+                    config_name = result.get("config_name", config_id)
+                    status = result.get("status", "unknown")
+                    if status == "success":
+                        config_summary = result.get("results", {}).get("summary", {})
+                        overall = config_summary.get("overall_status", "unknown")
+                        icon = "✅" if overall == "match" else "⚠️"
+                        st.markdown(f"{icon} **{config_name}**: {overall.upper()}")
+                    else:
+                        error = result.get("error", "Unknown error")
+                        st.markdown(f"❌ **{config_name}**: FAILED - {error}")
+
         elif comparison_mode == "tables":
             st.markdown("**Comparison Mode:** Table Comparison")
             col1, col2 = st.columns(2)
@@ -200,16 +229,30 @@ def display_summary_tab(results: dict):
 
     # Key metrics
     st.subheader("Key Metrics")
-    col1, col2, col3, col4 = st.columns(4)
 
-    with col1:
-        st.metric("Total Buckets", summary.get("total_buckets", 0))
-    with col2:
-        st.metric("Matching Buckets", summary.get("matching_buckets", 0))
-    with col3:
-        st.metric("Total Tables", summary.get("total_tables", 0))
-    with col4:
-        st.metric("Matching Tables", summary.get("matching_tables", 0))
+    # Check if this is component mode (has configs_compared)
+    if "configs_compared" in summary:
+        col1, col2, col3, col4, col5 = st.columns(5)
+        with col1:
+            st.metric("Configs Compared", summary.get("configs_compared", 0))
+        with col2:
+            st.metric("Total Buckets", summary.get("total_buckets", 0))
+        with col3:
+            st.metric("Matching Buckets", summary.get("matching_buckets", 0))
+        with col4:
+            st.metric("Total Tables", summary.get("total_tables", 0))
+        with col5:
+            st.metric("Matching Tables", summary.get("matching_tables", 0))
+    else:
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Buckets", summary.get("total_buckets", 0))
+        with col2:
+            st.metric("Matching Buckets", summary.get("matching_buckets", 0))
+        with col3:
+            st.metric("Total Tables", summary.get("total_tables", 0))
+        with col4:
+            st.metric("Matching Tables", summary.get("matching_tables", 0))
 
     # Difference breakdown
     if summary["overall_status"] != "match":

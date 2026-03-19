@@ -102,6 +102,10 @@ def create_orchestration_page():
         else:
             monitoring_phase(client)
 
+    elif comparison_mode == "component":
+        # Component mode: Process ALL configurations for a component
+        component_orchestration_flow(client)
+
     elif comparison_mode in ["tables", "buckets"]:
         # Simplified flow: Skip branch creation and job execution, go straight to comparison
         direct_comparison_page(client)
@@ -918,3 +922,650 @@ def direct_comparison_page(client: KeboolaAPIClient):
                 add_log("comparison", error_msg, "error")
                 st.error(f"❌ {error_msg}")
                 st.exception(e)
+
+
+def component_orchestration_flow(client: KeboolaAPIClient):
+    """
+    Orchestration flow for component mode - process ALL configurations.
+
+    Uses the same pattern as config mode:
+    1. Create 2 dev branches (production + test)
+    2. Update ALL discovered configs in both branches
+    3. Run ALL configs in both branches
+    4. Compare outputs
+
+    Args:
+        client: Keboola API client
+    """
+    st.subheader("🧩 Component Comparison")
+    show_advanced = is_advanced_view()
+
+    component_id = st.session_state.get("target_component_id")
+    config_states = st.session_state.get("config_execution_states", [])
+
+    st.markdown(f"**Component:** `{component_id}`")
+    st.markdown(f"**Configurations to process:** {len(config_states)}")
+    st.markdown(f"**Production Tag:** {st.session_state.get('production_image_tag')}")
+    st.markdown(f"**Test Tag:** {st.session_state.get('test_image_tag')}")
+
+    st.markdown("---")
+
+    # Check if comparison already done
+    if st.session_state.get("comparison_results"):
+        st.success("✅ Comparison complete!")
+        st.info("👉 Navigate to **📊 Results** in the sidebar to view comparison")
+
+        if st.button("🔄 Rerun Comparison"):
+            # Reset state for rerun
+            st.session_state.comparison_results = None
+            st.session_state.all_jobs_triggered = False
+            st.session_state.component_setup_complete = False
+            st.session_state.production_branch_id = None
+            st.session_state.test_branch_id = None
+            for state in config_states:
+                state["production_job_id"] = None
+                state["test_job_id"] = None
+                state["production_job_status"] = None
+                state["test_job_status"] = None
+                state["production_config_updated"] = False
+                state["test_config_updated"] = False
+            st.session_state.config_execution_states = config_states
+            st.rerun()
+        return
+
+    auto_run_enabled = st.session_state.get("auto_run", False)
+
+    # Phase 1: Setup (create 2 branches + update ALL configs in both)
+    if not st.session_state.get("component_setup_complete"):
+        component_setup_phase(client, config_states, auto_run_enabled, show_advanced)
+        return
+
+    # Phase 2: Execution (trigger ALL jobs)
+    if not st.session_state.get("all_jobs_triggered"):
+        component_execution_phase(client, config_states, auto_run_enabled, show_advanced)
+        return
+
+    # Phase 3: Monitoring (wait for jobs + comparison)
+    component_monitoring_phase(client, config_states, auto_run_enabled, show_advanced)
+
+
+def component_setup_phase(client: KeboolaAPIClient, config_states: list, auto_run: bool, show_advanced: bool):
+    """
+    Setup phase for component mode: Create 2 branches and update ALL configs.
+
+    Same pattern as config mode:
+    1. Create 2 dev branches (production + test)
+    2. Wait for branches to be ready (all configs auto-copied)
+    3. Update ALL configs in production branch with production tag
+    4. Update ALL configs in test branch with test tag
+
+    Args:
+        client: Keboola API client
+        config_states: List of per-config execution states
+        auto_run: Whether auto-run is enabled
+        show_advanced: Whether to show advanced details
+    """
+    st.subheader("📋 Setup Phase")
+
+    with st.expander("What happens in setup", expanded=show_advanced):
+        st.markdown("""
+        1. Create two development branches (production + test)
+        2. Wait for branches to be ready (configurations auto-copied)
+        3. Update ALL configurations in production branch with production tag
+        4. Update ALL configurations in test branch with test tag
+        """)
+
+    st.markdown("---")
+
+    # Step 1: Create branches (same as config mode)
+    prod_branch_id = st.session_state.get("production_branch_id")
+    test_branch_id = st.session_state.get("test_branch_id")
+
+    with st.expander("Step 1: Development Branches", expanded=not (prod_branch_id and test_branch_id)):
+        if prod_branch_id and test_branch_id:
+            st.success(f"✅ Production branch ready (ID: {prod_branch_id})")
+            st.success(f"✅ Test branch ready (ID: {test_branch_id})")
+            display_logs("branch_creation", show_details=show_advanced)
+        else:
+            st.info("Creating two development branches to isolate outputs")
+
+            trigger_branch_creation = auto_run or st.button("Create Development Branches", type="primary")
+
+            if trigger_branch_creation:
+                with st.spinner("Creating development branches..."):
+                    try:
+                        branch_prefix = st.session_state.get("branch_name", "comparison-test")
+
+                        # Create production branch
+                        add_log("branch_creation", f"Creating production branch: {branch_prefix}-production")
+                        prod_branch = client.get_or_create_branch(f"{branch_prefix}-production")
+                        prod_branch_id = prod_branch.get("id") or prod_branch.get("branchId")
+                        add_log("branch_creation", f"Production branch ready: {prod_branch_id}", "success")
+
+                        # Create test branch
+                        add_log("branch_creation", f"Creating test branch: {branch_prefix}-test")
+                        test_branch = client.get_or_create_branch(f"{branch_prefix}-test")
+                        test_branch_id = test_branch.get("id") or test_branch.get("branchId")
+                        add_log("branch_creation", f"Test branch ready: {test_branch_id}", "success")
+
+                        # Wait for API consistency
+                        time.sleep(2)
+
+                        # Wait for ALL configs to be copied to both branches
+                        component_id = st.session_state.get("target_component_id")
+                        total_configs = len(config_states)
+
+                        add_log("branch_creation", f"Waiting for {total_configs} configuration(s) to be copied to branches...")
+                        max_attempts = 180  # 15 minutes
+                        for attempt in range(max_attempts):
+                            try:
+                                # Verify ALL configs exist in both branches
+                                configs_ready = 0
+                                for state in config_states:
+                                    config_id = state["config_id"]
+                                    client.get_configuration_in_branch(component_id, config_id, prod_branch_id)
+                                    client.get_configuration_in_branch(component_id, config_id, test_branch_id)
+                                    configs_ready += 1
+
+                                add_log("branch_creation", f"All {total_configs} configurations copied to both branches", "success")
+                                break
+                            except requests.exceptions.HTTPError as e:
+                                if e.response.status_code == 404:
+                                    if attempt % 12 == 0:
+                                        st.caption(f"Waiting for configs... ({configs_ready}/{total_configs} ready, {attempt * 5}s elapsed)")
+                                    time.sleep(5)
+                                else:
+                                    raise
+                        else:
+                            raise TimeoutError(f"Not all configurations copied to branches within timeout ({configs_ready}/{total_configs} ready)")
+
+                        st.session_state.production_branch_id = prod_branch_id
+                        st.session_state.test_branch_id = test_branch_id
+                        st.success("✅ Both branches ready!")
+                        time.sleep(1)
+                        st.rerun()
+
+                    except Exception as e:
+                        error_msg = f"Failed to create branches: {str(e)}"
+                        add_log("branch_creation", error_msg, "error")
+                        st.error(f"❌ {error_msg}")
+                        st.exception(e)
+                return
+
+    # Step 2: Update ALL configs in production branch
+    if prod_branch_id and test_branch_id:
+        all_prod_updated = all(s.get("production_config_updated") for s in config_states)
+        all_test_updated = all(s.get("test_config_updated") for s in config_states)
+
+        with st.expander("Step 2: Update Production Branch Configs", expanded=not all_prod_updated):
+            if all_prod_updated:
+                st.success(f"✅ All {len(config_states)} configurations updated in production branch")
+                display_logs("config_production", show_details=show_advanced)
+            else:
+                updated_count = sum(1 for s in config_states if s.get("production_config_updated"))
+                st.info(f"Updating {len(config_states)} configurations with tag: **{st.session_state['production_image_tag']}**")
+                st.progress(updated_count / len(config_states))
+                st.caption(f"Progress: {updated_count}/{len(config_states)}")
+
+                # Display status table
+                display_component_config_status(config_states, "production")
+
+                trigger_prod_update = auto_run or st.button("Update Production Branch Configs", type="primary")
+
+                if trigger_prod_update:
+                    with st.spinner("Updating all configurations in production branch..."):
+                        try:
+                            component_id = st.session_state.get("target_component_id")
+                            prod_tag = st.session_state["production_image_tag"]
+
+                            # First verify all configs exist in the branch
+                            add_log("config_production", "Verifying configurations exist in production branch...")
+                            for state in config_states:
+                                config_id = state["config_id"]
+                                config_name = state["config_name"]
+                                try:
+                                    client.get_configuration_in_branch(component_id, config_id, prod_branch_id)
+                                except requests.exceptions.HTTPError as e:
+                                    if e.response.status_code == 404:
+                                        # Config not found - branch may be stale
+                                        st.error(f"❌ Configuration '{config_name}' not found in production branch.")
+                                        st.warning("The branch may be from a previous run and doesn't have this configuration.")
+                                        st.info("💡 Try clicking '🔄 Start New Comparison' in the sidebar to create fresh branches.")
+                                        return
+                                    raise
+
+                            # Now update all configs
+                            for state in config_states:
+                                if state.get("production_config_updated"):
+                                    continue
+
+                                config_id = state["config_id"]
+                                config_name = state["config_name"]
+
+                                add_log("config_production", f"Updating '{config_name}' with tag: {prod_tag}")
+                                client.update_configuration_tag(
+                                    component_id=component_id,
+                                    config_id=config_id,
+                                    config_data=state["original_config"].get("configuration", {}),
+                                    new_tag=prod_tag,
+                                    branch_id=prod_branch_id,
+                                )
+                                state["production_config_updated"] = True
+                                add_log("config_production", f"✓ '{config_name}' updated", "success")
+
+                            st.session_state.config_execution_states = config_states
+                            st.success("✅ All production branch configs updated!")
+                            time.sleep(1)
+                            st.rerun()
+
+                        except Exception as e:
+                            error_msg = f"Failed to update production configs: {str(e)}"
+                            add_log("config_production", error_msg, "error")
+                            st.error(f"❌ {error_msg}")
+                            st.exception(e)
+                    return
+
+        # Step 3: Update ALL configs in test branch
+        if all_prod_updated:
+            with st.expander("Step 3: Update Test Branch Configs", expanded=not all_test_updated):
+                if all_test_updated:
+                    st.success(f"✅ All {len(config_states)} configurations updated in test branch")
+                    display_logs("config_test", show_details=show_advanced)
+
+                    # All setup complete!
+                    st.session_state.component_setup_complete = True
+                    st.success("✅ Setup complete! All configurations ready.")
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    updated_count = sum(1 for s in config_states if s.get("test_config_updated"))
+                    st.info(f"Updating {len(config_states)} configurations with tag: **{st.session_state['test_image_tag']}**")
+                    st.progress(updated_count / len(config_states))
+                    st.caption(f"Progress: {updated_count}/{len(config_states)}")
+
+                    # Display status table
+                    display_component_config_status(config_states, "test")
+
+                    trigger_test_update = auto_run or st.button("Update Test Branch Configs", type="primary")
+
+                    if trigger_test_update:
+                        with st.spinner("Updating all configurations in test branch..."):
+                            try:
+                                component_id = st.session_state.get("target_component_id")
+                                test_tag = st.session_state["test_image_tag"]
+
+                                # First verify all configs exist in the branch
+                                add_log("config_test", "Verifying configurations exist in test branch...")
+                                for state in config_states:
+                                    config_id = state["config_id"]
+                                    config_name = state["config_name"]
+                                    try:
+                                        client.get_configuration_in_branch(component_id, config_id, test_branch_id)
+                                    except requests.exceptions.HTTPError as e:
+                                        if e.response.status_code == 404:
+                                            # Config not found - branch may be stale
+                                            st.error(f"❌ Configuration '{config_name}' not found in test branch.")
+                                            st.warning("The branch may be from a previous run and doesn't have this configuration.")
+                                            st.info("💡 Try clicking '🔄 Start New Comparison' in the sidebar to create fresh branches.")
+                                            return
+                                        raise
+
+                                # Now update all configs
+                                for state in config_states:
+                                    if state.get("test_config_updated"):
+                                        continue
+
+                                    config_id = state["config_id"]
+                                    config_name = state["config_name"]
+
+                                    add_log("config_test", f"Updating '{config_name}' with tag: {test_tag}")
+                                    client.update_configuration_tag(
+                                        component_id=component_id,
+                                        config_id=config_id,
+                                        config_data=state["original_config"].get("configuration", {}),
+                                        new_tag=test_tag,
+                                        branch_id=test_branch_id,
+                                    )
+                                    state["test_config_updated"] = True
+                                    add_log("config_test", f"✓ '{config_name}' updated", "success")
+
+                                st.session_state.config_execution_states = config_states
+                                st.success("✅ All test branch configs updated!")
+                                time.sleep(1)
+                                st.rerun()
+
+                            except Exception as e:
+                                error_msg = f"Failed to update test configs: {str(e)}"
+                                add_log("config_test", error_msg, "error")
+                                st.error(f"❌ {error_msg}")
+                                st.exception(e)
+
+
+def component_execution_phase(client: KeboolaAPIClient, config_states: list, auto_run: bool, show_advanced: bool):
+    """
+    Execution phase for component mode: Trigger jobs for all configurations.
+
+    Args:
+        client: Keboola API client
+        config_states: List of per-config execution states
+        auto_run: Whether auto-run is enabled
+        show_advanced: Whether to show advanced details
+    """
+    st.subheader("🚀 Triggering Jobs")
+
+    prod_branch_id = st.session_state.get("production_branch_id")
+    test_branch_id = st.session_state.get("test_branch_id")
+
+    st.markdown(f"""
+    All configurations are set up. Ready to trigger **{len(config_states) * 2}** jobs:
+    - **{len(config_states)}** production runs (tag: {st.session_state['production_image_tag']}) in branch {prod_branch_id}
+    - **{len(config_states)}** test runs (tag: {st.session_state['test_image_tag']}) in branch {test_branch_id}
+    """)
+
+    st.markdown("---")
+
+    # Auto-run or manual button trigger
+    trigger_jobs = auto_run or st.button("Start All Comparison Runs", type="primary")
+
+    if trigger_jobs:
+        with st.spinner("Triggering jobs for all configurations..."):
+            try:
+                component_id = st.session_state.get("target_component_id")
+                job_mode = st.session_state.get("job_mode", "run")
+
+                for state in config_states:
+                    config_id = state["config_id"]
+                    config_name = state["config_name"]
+
+                    add_log("job_execution", f"Triggering jobs for '{config_name}'...")
+
+                    # Trigger production job (using shared production branch)
+                    prod_job = client.run_component(
+                        component_id,
+                        config_id,
+                        branch_id=prod_branch_id,
+                        mode=job_mode,
+                    )
+                    state["production_job_id"] = prod_job["id"]
+                    state["production_job_status"] = "waiting"
+                    add_log("job_execution", f"Production job triggered for '{config_name}' (ID: {prod_job['id']})", "success")
+
+                    # Trigger test job (using shared test branch)
+                    test_job = client.run_component(
+                        component_id,
+                        config_id,
+                        branch_id=test_branch_id,
+                        mode=job_mode,
+                    )
+                    state["test_job_id"] = test_job["id"]
+                    state["test_job_status"] = "waiting"
+                    add_log("job_execution", f"Test job triggered for '{config_name}' (ID: {test_job['id']})", "success")
+
+                st.session_state.config_execution_states = config_states
+                st.session_state.all_jobs_triggered = True
+                add_log("job_execution", f"All {len(config_states) * 2} jobs triggered successfully!", "success")
+
+                st.success("✅ All jobs triggered!")
+                time.sleep(1)
+                st.rerun()
+
+            except Exception as e:
+                error_msg = f"Failed to trigger jobs: {str(e)}"
+                add_log("job_execution", error_msg, "error")
+                st.error(f"❌ {error_msg}")
+                st.exception(e)
+
+
+def component_monitoring_phase(client: KeboolaAPIClient, config_states: list, auto_run: bool, show_advanced: bool):
+    """
+    Monitoring phase for component mode: Poll job statuses and trigger comparison.
+
+    Args:
+        client: Keboola API client
+        config_states: List of per-config execution states
+        auto_run: Whether auto-run is enabled
+        show_advanced: Whether to show advanced details
+    """
+    st.subheader("📊 Job Monitoring")
+
+    # Show preserved logs from job execution
+    display_logs("job_execution", show_details=show_advanced)
+
+    # Update job statuses
+    any_running = False
+    all_success = True
+    any_failed = False
+
+    for state in config_states:
+        if state.get("production_job_id"):
+            try:
+                prod_status = client.get_job_status(state["production_job_id"])
+                state["production_job_status"] = prod_status["status"]
+            except Exception:
+                state["production_job_status"] = "error"
+
+        if state.get("test_job_id"):
+            try:
+                test_status = client.get_job_status(state["test_job_id"])
+                state["test_job_status"] = test_status["status"]
+            except Exception:
+                state["test_job_status"] = "error"
+
+        # Check statuses
+        prod_s = state.get("production_job_status", "unknown")
+        test_s = state.get("test_job_status", "unknown")
+
+        if prod_s in ["created", "waiting", "processing"] or test_s in ["created", "waiting", "processing"]:
+            any_running = True
+            all_success = False
+
+        if prod_s in ["error", "cancelled", "terminated"] or test_s in ["error", "cancelled", "terminated"]:
+            any_failed = True
+            all_success = False
+
+        if prod_s != "success" or test_s != "success":
+            all_success = False
+
+    st.session_state.config_execution_states = config_states
+
+    # Display job progress table
+    display_component_job_progress(config_states)
+
+    # Auto-refresh if jobs are still running
+    if any_running:
+        st.info("⏳ Jobs are still running... Page will auto-refresh")
+        time.sleep(5)
+        st.rerun()
+        return
+
+    st.markdown("---")
+
+    if all_success:
+        st.success("✅ All jobs completed successfully!")
+
+        # Check if comparison was already done
+        if st.session_state.get("comparison_results"):
+            st.info("✅ Comparison already completed. Navigate to Results to view.")
+            return
+
+        # Auto-run or manual button trigger
+        trigger_comparison = auto_run or st.button("Proceed to Comparison", type="primary")
+
+        if trigger_comparison:
+            start_component_comparison(client, config_states)
+
+    elif any_failed:
+        st.warning("⚠️ Some jobs failed. Comparison will be performed for successful job pairs only.")
+
+        # Count successful pairs
+        successful_pairs = [
+            s for s in config_states
+            if s.get("production_job_status") == "success" and s.get("test_job_status") == "success"
+        ]
+
+        if successful_pairs:
+            st.info(f"**{len(successful_pairs)}** out of **{len(config_states)}** configuration(s) completed successfully.")
+
+            # Check if comparison was already done
+            if st.session_state.get("comparison_results"):
+                st.info("✅ Comparison already completed. Navigate to Results to view.")
+                return
+
+            trigger_comparison = auto_run or st.button("Compare Successful Configurations", type="primary")
+
+            if trigger_comparison:
+                start_component_comparison(client, config_states)
+        else:
+            st.error("❌ No successful job pairs to compare.")
+
+            if st.button("🔄 Retry All Jobs"):
+                # Reset job state
+                for state in config_states:
+                    state["production_job_id"] = None
+                    state["test_job_id"] = None
+                    state["production_job_status"] = None
+                    state["test_job_status"] = None
+                st.session_state.config_execution_states = config_states
+                st.session_state.all_jobs_triggered = False
+                st.rerun()
+
+
+def display_component_config_status(config_states: list, branch_type: str = "both"):
+    """Display config update status table for all configurations.
+
+    Args:
+        config_states: List of config execution states
+        branch_type: "production", "test", or "both"
+    """
+    import pandas as pd
+
+    data = []
+    for state in config_states:
+        row = {
+            "Configuration": state["config_name"],
+            "Config ID": state["config_id"][:16] + "...",
+        }
+
+        if branch_type in ("production", "both"):
+            row["Prod Updated"] = "✅" if state.get("production_config_updated") else "⏳"
+        if branch_type in ("test", "both"):
+            row["Test Updated"] = "✅" if state.get("test_config_updated") else "⏳"
+
+        data.append(row)
+
+    df = pd.DataFrame(data)
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+
+def display_component_job_progress(config_states: list):
+    """Display job progress table for all configurations."""
+    import pandas as pd
+
+    status_icon = {
+        "created": "🆕",
+        "waiting": "⏳",
+        "processing": "⚙️",
+        "success": "✅",
+        "error": "❌",
+        "cancelled": "🚫",
+        "terminated": "🛑",
+        None: "—",
+        "unknown": "❓",
+    }
+
+    data = []
+    for state in config_states:
+        prod_s = state.get("production_job_status")
+        test_s = state.get("test_job_status")
+
+        data.append({
+            "Configuration": state["config_name"],
+            "Production Job": f"{status_icon.get(prod_s, '❓')} {(prod_s or 'N/A').upper()}",
+            "Test Job": f"{status_icon.get(test_s, '❓')} {(test_s or 'N/A').upper()}",
+            "Prod Job ID": state.get("production_job_id", "—")[:12] + "..." if state.get("production_job_id") else "—",
+            "Test Job ID": state.get("test_job_id", "—")[:12] + "..." if state.get("test_job_id") else "—",
+        })
+
+    df = pd.DataFrame(data)
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+
+def start_component_comparison(client: KeboolaAPIClient, config_states: list):
+    """
+    Trigger comparison for component mode using shared branches.
+
+    Since all configs run in the same 2 branches, we compare at the branch level
+    (same as config mode), which captures outputs from ALL configurations.
+
+    Args:
+        client: Keboola API client
+        config_states: List of per-config execution states
+    """
+    # Clear Streamlit cache
+    st.cache_data.clear()
+
+    with st.spinner("Comparing outputs... This may take a while"):
+        try:
+            add_log("comparison", "Starting component comparison engine...")
+            engine = ComparisonEngine(client)
+
+            # Use shared branch IDs
+            prod_branch_id = st.session_state.get("production_branch_id")
+            test_branch_id = st.session_state.get("test_branch_id")
+
+            add_log("comparison", f"Comparing production branch {prod_branch_id} vs test branch {test_branch_id}...")
+
+            # Compare outputs from the two branches (captures ALL config outputs)
+            results = engine.compare_outputs(
+                production_branch=prod_branch_id,
+                test_branch_id=test_branch_id,
+            )
+
+            # Add component-specific metadata to results
+            successful_configs = [
+                s for s in config_states
+                if s.get("production_job_status") == "success" and s.get("test_job_status") == "success"
+            ]
+            failed_configs = [
+                s for s in config_states
+                if s.get("production_job_status") != "success" or s.get("test_job_status") != "success"
+            ]
+
+            results["summary"]["configs_compared"] = len(successful_configs)
+            results["summary"]["configs_failed"] = len(failed_configs)
+
+            if failed_configs:
+                failed_names = [s["config_name"] for s in failed_configs]
+                results["summary"]["key_findings"].append(
+                    f"Note: {len(failed_configs)} configuration(s) had job failures: {', '.join(failed_names[:3])}{'...' if len(failed_names) > 3 else ''}"
+                )
+
+            # Store per-config job info for reference
+            results["per_config_results"] = {}
+            for state in config_states:
+                results["per_config_results"][state["config_id"]] = {
+                    "config_name": state["config_name"],
+                    "production_job_id": state.get("production_job_id"),
+                    "test_job_id": state.get("test_job_id"),
+                    "production_job_status": state.get("production_job_status"),
+                    "test_job_status": state.get("test_job_status"),
+                    "status": "success" if (
+                        state.get("production_job_status") == "success" and
+                        state.get("test_job_status") == "success"
+                    ) else "failed",
+                }
+
+            st.session_state.comparison_results = results
+            add_log("comparison", "Component comparison completed successfully!", "success")
+
+            st.success("✅ Comparison complete!")
+            st.info("👉 Navigate to **📊 Results** in the sidebar to view comparison")
+
+            time.sleep(2)
+            st.rerun()
+
+        except Exception as e:
+            error_msg = f"Component comparison failed: {str(e)}"
+            add_log("comparison", error_msg, "error")
+            st.error(f"❌ {error_msg}")
+            st.exception(e)

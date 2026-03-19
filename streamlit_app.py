@@ -55,6 +55,8 @@ def main():
     mode = st.session_state.get("comparison_mode")
     if mode == "config":
         st.sidebar.info("📋 Mode: Configuration")
+    elif mode == "component":
+        st.sidebar.info("🧩 Mode: Component")
     elif mode == "tables":
         st.sidebar.info("📊 Mode: Table Comparison")
     elif mode == "buckets":
@@ -151,6 +153,12 @@ def initialize_session_state():
         "comparison_results": None,
         # UI preferences
         "show_advanced": False,
+        # Component mode fields
+        "target_component_id": None,       # Component ID for component mode
+        "discovered_configs": [],          # List of discovered configurations
+        "config_execution_states": [],     # Per-config execution tracking
+        "component_setup_complete": False, # All branches created and configs updated
+        "all_jobs_triggered": False,       # All jobs have been triggered
     }
 
     for key, value in defaults.items():
